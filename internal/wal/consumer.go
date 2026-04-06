@@ -84,6 +84,22 @@ func (c *Consumer) Start(ctx context.Context, events chan<- RowEvent, ackCh <-ch
 		tableFlushLSN[table] = lsn
 	}
 
+	// Load backfill filters. Any entry here means a resync has been
+	// performed for that table at snapshot LSN X; main-slot events whose
+	// WAL position is <= X are already included in the COPY-sourced
+	// snapshot and must be dropped to avoid duplicates. Keyed by
+	// "schema.table" to match the event shape below. The filter
+	// auto-clears the first time an event crosses the threshold.
+	backfillFilters, err := c.state.GetBackfillLSNs()
+	if err != nil {
+		return fmt.Errorf("load backfill filters: %w", err)
+	}
+	if len(backfillFilters) > 0 {
+		c.logger.Info("backfill overlap filters active",
+			"tables", len(backfillFilters),
+		)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -159,6 +175,55 @@ func (c *Consumer) Start(ctx context.Context, events chan<- RowEvent, ackCh <-ch
 				continue
 			}
 
+			// shouldProcess applies the exclude list, backfill-overlap
+			// filter, and already-flushed dedup check common to every
+			// row-change event. It returns the relation and a bool
+			// indicating whether the event should be forwarded. It also
+			// clears the backfill filter on the first event past its
+			// threshold.
+			shouldProcess := func(relID uint32) (*RelationMessage, bool) {
+				rel := c.decoder.Relations()[relID]
+				if rel == nil {
+					return nil, false
+				}
+				key := fmt.Sprintf("%s.%s", rel.Namespace, rel.Name)
+				if c.excludeTables[key] {
+					return rel, false
+				}
+				if filterLSN, hasFilter := backfillFilters[key]; hasFilter {
+					if xld.WALStart <= filterLSN {
+						c.logger.Debug("dropping backfill-overlap event",
+							"table", key,
+							"event_lsn", xld.WALStart,
+							"filter_lsn", filterLSN,
+						)
+						return rel, false
+					}
+					delete(backfillFilters, key)
+					if err := c.state.ClearBackfillLSN(rel.Namespace, rel.Name); err != nil {
+						c.logger.Warn("clear backfill_lsn", "table", key, "error", err)
+					} else {
+						c.logger.Info("backfill overlap filter cleared",
+							"table", key,
+							"at_lsn", xld.WALStart,
+						)
+					}
+				}
+				if storeLsn := tableFlushLSN[rel.Name]; storeLsn >= xld.WALStart {
+					return rel, false
+				}
+				return rel, true
+			}
+
+			sendEvent := func(ev RowEvent) error {
+				select {
+				case events <- ev:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+
 			switch v := decoded.(type) {
 			case *RelationMessage:
 				// Check exclude filter
@@ -169,31 +234,71 @@ func (c *Consumer) Start(ctx context.Context, events chan<- RowEvent, ackCh <-ch
 
 			case *InsertMessage:
 				c.logger.Info("received insert message", "lsn", xld.WALStart.String())
-				rel := c.decoder.Relations()[v.RelationID]
-				if rel == nil {
+				rel, ok := shouldProcess(v.RelationID)
+				if !ok {
 					continue
 				}
-				key := fmt.Sprintf("%s.%s", rel.Namespace, rel.Name)
-				if c.excludeTables[key] {
-					continue
-				}
-				// dedup logic - if the table is already processed skip it
-				storeLsn := tableFlushLSN[rel.Name]
-				if storeLsn >= xld.WALStart {
-					continue
-				}
-
-				event := RowEvent{
+				if err := sendEvent(RowEvent{
 					Schema:      rel.Namespace,
 					Table:       rel.Name,
 					Columns:     rel.Columns,
+					KeyColumns:  rel.KeyColumnIndexes,
+					Op:          OpInsert,
 					Values:      v.Row,
 					WALStartLSN: xld.WALStart,
+				}); err != nil {
+					return err
 				}
-				select {
-				case events <- event:
-				case <-ctx.Done():
-					return ctx.Err()
+
+			case *UpdateMessage:
+				c.logger.Info("received update message", "lsn", xld.WALStart.String())
+				rel, ok := shouldProcess(v.RelationID)
+				if !ok {
+					continue
+				}
+				if len(rel.KeyColumnIndexes) == 0 {
+					c.logger.Warn("skipping UPDATE on table with no REPLICA IDENTITY key",
+						"table", fmt.Sprintf("%s.%s", rel.Namespace, rel.Name),
+						"lsn", xld.WALStart.String(),
+					)
+					continue
+				}
+				if err := sendEvent(RowEvent{
+					Schema:      rel.Namespace,
+					Table:       rel.Name,
+					Columns:     rel.Columns,
+					KeyColumns:  rel.KeyColumnIndexes,
+					Op:          OpUpdate,
+					Values:      v.NewRow,
+					OldKey:      v.OldKey,
+					WALStartLSN: xld.WALStart,
+				}); err != nil {
+					return err
+				}
+
+			case *DeleteMessage:
+				c.logger.Info("received delete message", "lsn", xld.WALStart.String())
+				rel, ok := shouldProcess(v.RelationID)
+				if !ok {
+					continue
+				}
+				if len(rel.KeyColumnIndexes) == 0 || v.OldKey == nil {
+					c.logger.Warn("skipping DELETE without usable key",
+						"table", fmt.Sprintf("%s.%s", rel.Namespace, rel.Name),
+						"lsn", xld.WALStart.String(),
+					)
+					continue
+				}
+				if err := sendEvent(RowEvent{
+					Schema:      rel.Namespace,
+					Table:       rel.Name,
+					Columns:     rel.Columns,
+					KeyColumns:  rel.KeyColumnIndexes,
+					Op:          OpDelete,
+					OldKey:      v.OldKey,
+					WALStartLSN: xld.WALStart,
+				}); err != nil {
+					return err
 				}
 
 			case *pglogrepl.CommitMessage:

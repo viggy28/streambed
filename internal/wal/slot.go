@@ -61,6 +61,57 @@ func CreateOrReuseSlot(ctx context.Context, conn *pgconn.PgConn, slotName string
 	return lsn, nil
 }
 
+// TempSlotWithSnapshot holds the result of creating a temporary replication
+// slot that exports a consistent snapshot for backfill / resync reads.
+type TempSlotWithSnapshot struct {
+	// SlotName is the generated slot name (randomised per invocation so
+	// concurrent resyncs can't collide).
+	SlotName string
+	// SnapshotName is the exported snapshot id, suitable for passing to
+	// `SET TRANSACTION SNAPSHOT '<name>'` on a separate connection.
+	SnapshotName string
+	// ConsistentPoint is the WAL LSN at which the snapshot was exported.
+	// Any WAL record at or before this LSN is already reflected in the
+	// snapshot — the consumer should drop main-slot events with WAL
+	// position ≤ ConsistentPoint to avoid duplicating backfilled rows.
+	ConsistentPoint pglogrepl.LSN
+}
+
+// CreateTempSlotWithSnapshot creates a TEMPORARY logical replication slot
+// using the pgoutput plugin with EXPORT_SNAPSHOT. The exported snapshot is
+// valid only for the lifetime of the replication connection used here; the
+// caller MUST keep that connection open while reading via SET TRANSACTION
+// SNAPSHOT on a second connection. When the replication connection closes
+// the temp slot is dropped automatically by Postgres — no clean-up required.
+func CreateTempSlotWithSnapshot(ctx context.Context, conn *pgconn.PgConn, slotName string, logger *slog.Logger) (TempSlotWithSnapshot, error) {
+	res, err := pglogrepl.CreateReplicationSlot(ctx, conn, slotName, "pgoutput",
+		pglogrepl.CreateReplicationSlotOptions{
+			Temporary:      true,
+			SnapshotAction: "EXPORT_SNAPSHOT",
+		},
+	)
+	if err != nil {
+		return TempSlotWithSnapshot{}, fmt.Errorf("create temp slot %q: %w", slotName, err)
+	}
+
+	lsn, err := pglogrepl.ParseLSN(res.ConsistentPoint)
+	if err != nil {
+		return TempSlotWithSnapshot{}, fmt.Errorf("parse consistent point %q: %w", res.ConsistentPoint, err)
+	}
+
+	logger.Info("created temp snapshot slot",
+		"slot", slotName,
+		"snapshot", res.SnapshotName,
+		"consistent_point", lsn,
+	)
+
+	return TempSlotWithSnapshot{
+		SlotName:        slotName,
+		SnapshotName:    res.SnapshotName,
+		ConsistentPoint: lsn,
+	}, nil
+}
+
 // CreatePublication creates a publication if it doesn't exist.
 func CreatePublication(ctx context.Context, conn *pgconn.PgConn, pubName string, includeTables []string, logger *slog.Logger) error {
 	// Check if publication exists

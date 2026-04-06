@@ -76,6 +76,62 @@ func TestWriteManifestListAvro(t *testing.T) {
 	}
 }
 
+// TestWriteManifestAvroZeroRows verifies that iceberg-go rejects a manifest
+// entry with record_count=0. This is the root cause of the "record count must
+// be greater than 0" error and validates that our CommitChangeset routing
+// to commitEmptyTable is necessary.
+func TestWriteManifestAvroZeroRows(t *testing.T) {
+	schema := ice.NewSchema(0,
+		ice.NestedField{ID: 1, Name: "id", Type: ice.PrimitiveTypes.Int64, Required: true},
+	)
+
+	_, _, err := writeManifestAvro(
+		"s3://bucket/prefix/metadata/test-m0.avro",
+		schema,
+		1234567890,
+		1,
+		"s3://bucket/prefix/data/empty.parquet",
+		0, // 0 rows
+		100,
+	)
+	if err == nil {
+		t.Fatal("expected error for 0-row manifest, got nil")
+	}
+	t.Logf("confirmed iceberg-go rejects 0-row data file: %v", err)
+}
+
+// TestWriteEqDeleteManifestAvro verifies that equality-delete manifests
+// can be written and that the manifest content type is set correctly.
+func TestWriteEqDeleteManifestAvro(t *testing.T) {
+	schema := ice.NewSchema(0,
+		ice.NestedField{ID: 1, Name: "id", Type: ice.PrimitiveTypes.Int64, Required: true},
+		ice.NestedField{ID: 2, Name: "name", Type: ice.PrimitiveTypes.String, Required: false},
+	)
+
+	data, mf, err := writeEqDeleteManifestAvro(
+		"s3://bucket/prefix/metadata/test-del.avro",
+		schema,
+		1234567890,
+		1,
+		"s3://bucket/prefix/data/test-delete.parquet",
+		5,
+		1024,
+		[]int{1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) == 0 {
+		t.Fatal("expected non-empty avro data")
+	}
+	if mf == nil {
+		t.Fatal("expected non-nil ManifestFile")
+	}
+	if mf.ManifestContent() != ice.ManifestContentDeletes {
+		t.Errorf("expected delete manifest content, got %v", mf.ManifestContent())
+	}
+}
+
 func TestBuildIcebergSchema(t *testing.T) {
 	cols := []ColumnDef{
 		{Name: "id", OID: 20},        // int8 → Int64

@@ -158,22 +158,215 @@ func TestDecodeBeginCommit(t *testing.T) {
 	}
 }
 
-func TestDecodeUpdateDeleteSkipped(t *testing.T) {
+// registerTwoColRelation sets up a relation where column 0 ("id") is the
+// REPLICA IDENTITY key (Flags&1 != 0) and column 1 ("name") is a regular
+// column. Used by the UPDATE/DELETE tests below.
+func registerTwoColRelation(d *Decoder, relID uint32) {
+	d.Decode(&pglogrepl.RelationMessage{
+		RelationID:   relID,
+		Namespace:    "public",
+		RelationName: "users",
+		Columns: []*pglogrepl.RelationMessageColumn{
+			{Flags: 1, Name: "id", DataType: 23}, // key
+			{Flags: 0, Name: "name", DataType: 25},
+		},
+	})
+}
+
+func TestDecodeRelation_CapturesKeyColumns(t *testing.T) {
 	d := testDecoder()
+	registerTwoColRelation(d, 100)
 
-	result, err := d.Decode(&pglogrepl.UpdateMessage{})
+	rel := d.Relations()[100]
+	if len(rel.KeyColumnIndexes) != 1 || rel.KeyColumnIndexes[0] != 0 {
+		t.Fatalf("expected KeyColumnIndexes=[0], got %v", rel.KeyColumnIndexes)
+	}
+	if !rel.Columns[0].IsKey {
+		t.Error("column 0 should be marked IsKey")
+	}
+	if rel.Columns[1].IsKey {
+		t.Error("column 1 should not be marked IsKey")
+	}
+}
+
+// Unchanged key (no old tuple): the decoder must reconstruct OldKey from
+// the NEW tuple's key-column values.
+func TestDecodeUpdate_KeyUnchangedUsesNewTuple(t *testing.T) {
+	d := testDecoder()
+	registerTwoColRelation(d, 1)
+
+	result, err := d.Decode(&pglogrepl.UpdateMessage{
+		RelationID: 1,
+		// No OldTuple: key was not modified.
+		NewTuple: &pglogrepl.TupleData{
+			Columns: []*pglogrepl.TupleDataColumn{
+				{DataType: 't', Data: []byte("42")},
+				{DataType: 't', Data: []byte("bob")},
+			},
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result != nil {
-		t.Error("expected nil for Update in Phase 1")
+	upd, ok := result.(*UpdateMessage)
+	if !ok {
+		t.Fatalf("expected *UpdateMessage, got %T", result)
 	}
+	if len(upd.OldKey) != 1 {
+		t.Fatalf("expected 1 key column, got %d", len(upd.OldKey))
+	}
+	if string(upd.OldKey[0].Value) != "42" {
+		t.Errorf("OldKey[0]=%q, want 42", upd.OldKey[0].Value)
+	}
+	if string(upd.NewRow[1].Value) != "bob" {
+		t.Errorf("NewRow[1]=%q, want bob", upd.NewRow[1].Value)
+	}
+}
 
-	result, err = d.Decode(&pglogrepl.DeleteMessage{})
+// Key changed ('K' old-tuple): the decoder picks the OLD key value out of
+// the key-only old tuple, not the new tuple.
+func TestDecodeUpdate_KeyChangedUsesOldTuple(t *testing.T) {
+	d := testDecoder()
+	registerTwoColRelation(d, 1)
+
+	result, err := d.Decode(&pglogrepl.UpdateMessage{
+		RelationID:   1,
+		OldTupleType: 'K',
+		OldTuple: &pglogrepl.TupleData{
+			// With 'K', pglogrepl still gives us a tuple sized to the
+			// relation's columns; non-key positions appear as nulls.
+			Columns: []*pglogrepl.TupleDataColumn{
+				{DataType: 't', Data: []byte("7")}, // old id
+				{DataType: 'n'},
+			},
+		},
+		NewTuple: &pglogrepl.TupleData{
+			Columns: []*pglogrepl.TupleDataColumn{
+				{DataType: 't', Data: []byte("8")}, // new id
+				{DataType: 't', Data: []byte("carol")},
+			},
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result != nil {
-		t.Error("expected nil for Delete in Phase 1")
+	upd := result.(*UpdateMessage)
+	if string(upd.OldKey[0].Value) != "7" {
+		t.Errorf("OldKey[0]=%q, want 7 (old id)", upd.OldKey[0].Value)
+	}
+	if string(upd.NewRow[0].Value) != "8" {
+		t.Errorf("NewRow[0]=%q, want 8 (new id)", upd.NewRow[0].Value)
+	}
+}
+
+// REPLICA IDENTITY FULL ('O' old-tuple): all columns present in the old
+// tuple, but we still only extract the key-column positions.
+func TestDecodeUpdate_FullOldTuple(t *testing.T) {
+	d := testDecoder()
+	registerTwoColRelation(d, 1)
+
+	result, err := d.Decode(&pglogrepl.UpdateMessage{
+		RelationID:   1,
+		OldTupleType: 'O',
+		OldTuple: &pglogrepl.TupleData{
+			Columns: []*pglogrepl.TupleDataColumn{
+				{DataType: 't', Data: []byte("9")},
+				{DataType: 't', Data: []byte("dave-old")},
+			},
+		},
+		NewTuple: &pglogrepl.TupleData{
+			Columns: []*pglogrepl.TupleDataColumn{
+				{DataType: 't', Data: []byte("9")},
+				{DataType: 't', Data: []byte("dave-new")},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upd := result.(*UpdateMessage)
+	if len(upd.OldKey) != 1 || string(upd.OldKey[0].Value) != "9" {
+		t.Errorf("OldKey=%+v, want single value '9'", upd.OldKey)
+	}
+}
+
+// Tables without REPLICA IDENTITY key columns: decoder returns the
+// message with no OldKey. The consumer is responsible for skipping these.
+func TestDecodeUpdate_NoKeyColumns(t *testing.T) {
+	d := testDecoder()
+	d.Decode(&pglogrepl.RelationMessage{
+		RelationID:   2,
+		Namespace:    "public",
+		RelationName: "nokey",
+		Columns: []*pglogrepl.RelationMessageColumn{
+			{Flags: 0, Name: "val", DataType: 23},
+		},
+	})
+
+	result, err := d.Decode(&pglogrepl.UpdateMessage{
+		RelationID: 2,
+		NewTuple: &pglogrepl.TupleData{
+			Columns: []*pglogrepl.TupleDataColumn{{DataType: 't', Data: []byte("1")}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upd := result.(*UpdateMessage)
+	if upd.OldKey != nil {
+		t.Errorf("expected nil OldKey, got %+v", upd.OldKey)
+	}
+}
+
+func TestDecodeDelete(t *testing.T) {
+	d := testDecoder()
+	registerTwoColRelation(d, 3)
+
+	result, err := d.Decode(&pglogrepl.DeleteMessage{
+		RelationID:   3,
+		OldTupleType: 'K',
+		OldTuple: &pglogrepl.TupleData{
+			Columns: []*pglogrepl.TupleDataColumn{
+				{DataType: 't', Data: []byte("55")},
+				{DataType: 'n'},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	del, ok := result.(*DeleteMessage)
+	if !ok {
+		t.Fatalf("expected *DeleteMessage, got %T", result)
+	}
+	if len(del.OldKey) != 1 || string(del.OldKey[0].Value) != "55" {
+		t.Errorf("OldKey=%+v, want ['55']", del.OldKey)
+	}
+}
+
+func TestDecodeDelete_NoOldTuple(t *testing.T) {
+	d := testDecoder()
+	registerTwoColRelation(d, 4)
+
+	// Postgres would not normally send a delete with no old tuple, but
+	// the decoder must degrade gracefully rather than panic.
+	result, err := d.Decode(&pglogrepl.DeleteMessage{RelationID: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	del := result.(*DeleteMessage)
+	if del.OldKey != nil {
+		t.Errorf("expected nil OldKey when OldTuple missing, got %+v", del.OldKey)
+	}
+}
+
+func TestDecodeUpdate_UnknownRelation(t *testing.T) {
+	d := testDecoder()
+	_, err := d.Decode(&pglogrepl.UpdateMessage{
+		RelationID: 999,
+		NewTuple:   &pglogrepl.TupleData{},
+	})
+	if err == nil {
+		t.Error("expected error for unknown relation")
 	}
 }

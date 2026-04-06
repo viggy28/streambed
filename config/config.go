@@ -21,6 +21,7 @@ type Config struct {
 	IncludeTables []string
 	ExcludeTables []string
 	LogLevel      string
+	QueryAddr     string // listen address for query server (e.g., ":5433")
 }
 
 func Default() *Config {
@@ -30,7 +31,7 @@ func Default() *Config {
 		StatePath:     defaultStatePath(),
 		SlotName:      "streambed",
 		FlushRows:     10000,
-		FlushInterval: 30 * time.Second,
+		FlushInterval: 2 * time.Second,
 		LogLevel:      "INFO",
 	}
 }
@@ -88,6 +89,9 @@ func Load() *Config {
 	if v := os.Getenv("STREAMBED_LOG_LEVEL"); v != "" {
 		cfg.LogLevel = strings.ToUpper(v)
 	}
+	if v := os.Getenv("STREAMBED_QUERY_ADDR"); v != "" {
+		cfg.QueryAddr = v
+	}
 
 	return cfg
 }
@@ -119,6 +123,18 @@ func (c *Config) Validate() error {
 	}
 	if c.FlushInterval <= 0 {
 		return fmt.Errorf("flush-interval must be positive")
+	}
+	return nil
+}
+
+// ValidateQuery validates config for query-only mode.
+// Does not require source-url since no Postgres connection is needed.
+func (c *Config) ValidateQuery() error {
+	if c.S3Bucket == "" {
+		return fmt.Errorf("s3-bucket is required")
+	}
+	if c.QueryAddr == "" {
+		return fmt.Errorf("listen-addr is required")
 	}
 	return nil
 }

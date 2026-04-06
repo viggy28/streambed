@@ -96,6 +96,55 @@ func writeManifestAvro(
 	return buf.Bytes(), mf, nil
 }
 
+// writeEqDeleteManifestAvro writes an Avro manifest file that tracks one
+// equality-delete file. Iceberg v2 requires data and delete entries to be
+// in separate manifest files (content=DELETES at the manifest-file level),
+// so this is a sibling of writeManifestAvro rather than a shared path.
+//
+// equalityFieldIDs lists the Iceberg field IDs of the columns present in
+// the delete parquet file — readers match rows whose values in those
+// columns equal any row in the delete file and drop them.
+func writeEqDeleteManifestAvro(
+	filename string,
+	schema *ice.Schema,
+	snapshotID int64,
+	seqNum int64,
+	deleteFilePath string,
+	rowCount int64,
+	fileSize int64,
+	equalityFieldIDs []int,
+) ([]byte, ice.ManifestFile, error) {
+	dfBuilder, err := ice.NewDataFileBuilder(
+		*ice.UnpartitionedSpec,
+		ice.EntryContentEqDeletes,
+		deleteFilePath,
+		ice.ParquetFile,
+		nil, nil, nil,
+		rowCount,
+		fileSize,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build eq-delete file: %w", err)
+	}
+	df := dfBuilder.EqualityFieldIDs(equalityFieldIDs).Build()
+
+	entry := ice.NewManifestEntryBuilder(
+		ice.EntryStatusADDED,
+		&snapshotID,
+		df,
+	).
+		SequenceNum(seqNum).
+		FileSequenceNum(seqNum).
+		Build()
+
+	buf := new(bytes.Buffer)
+	mf, err := ice.WriteManifest(filename, buf, 2, *ice.UnpartitionedSpec, schema, snapshotID, []ice.ManifestEntry{entry})
+	if err != nil {
+		return nil, nil, fmt.Errorf("write eq-delete manifest: %w", err)
+	}
+	return buf.Bytes(), mf, nil
+}
+
 // writeManifestListAvro writes an Avro manifest list using iceberg-go's WriteManifestList.
 func writeManifestListAvro(snapshotID int64, seqNum int64, parentSnapshotID *int64, files []ice.ManifestFile) ([]byte, error) {
 	buf := new(bytes.Buffer)

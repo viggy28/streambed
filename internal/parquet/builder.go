@@ -13,9 +13,16 @@ import (
 )
 
 // ColumnDef describes a column for Parquet writing.
+//
+// FieldID is the Iceberg field ID to stamp on the Parquet column. When
+// zero, the column's positional index (i+1) is used. Explicit IDs are
+// needed when writing a subset of a table's columns — e.g. an equality
+// delete file that contains only the key columns but must still carry
+// the same field IDs as in the table's schema.
 type ColumnDef struct {
-	Name string
-	OID  uint32
+	Name    string
+	OID     uint32
+	FieldID int
 }
 
 // Builder creates Parquet files from row batches.
@@ -25,10 +32,6 @@ type Builder struct{}
 // converts them to typed Go values, and writes a Parquet file.
 // Returns the Parquet file as bytes.
 func (b *Builder) Build(columns []ColumnDef, rows [][]Value) ([]byte, error) {
-	if len(rows) == 0 {
-		return nil, fmt.Errorf("no rows to write")
-	}
-
 	schema := buildSchema(columns)
 	buf := new(bytes.Buffer)
 
@@ -76,11 +79,18 @@ func buildSchema(columns []ColumnDef) *parquet.Schema {
 }
 
 func schemaToGroup(columns []ColumnDef) parquet.Group {
-	fields := make([]parquet.Column, 0, len(columns))
-	_ = fields
 	group := make(parquet.Group)
-	for _, col := range columns {
-		group[col.Name] = parquet.Optional(oidToParquetNode(col.OID))
+	for i, col := range columns {
+		// Iceberg field IDs are 1-indexed and match the catalog's assignment
+		// in catalog.go (ID: i+1). iceberg_scan uses these IDs to match
+		// Parquet columns to Iceberg schema columns — without them, values
+		// are returned as NULL.
+		id := col.FieldID
+		if id == 0 {
+			id = i + 1
+		}
+		node := parquet.Optional(oidToParquetNode(col.OID))
+		group[col.Name] = parquet.FieldID(node, id)
 	}
 	return group
 }
