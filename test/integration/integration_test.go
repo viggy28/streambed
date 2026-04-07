@@ -29,7 +29,7 @@ import (
 
 const (
 	pgHost     = "localhost"
-	pgPort     = "5433"
+	pgPort     = "5434"
 	pgUser     = "postgres"
 	pgPassword = "test"
 	pgDB       = "postgres"
@@ -147,14 +147,19 @@ func insertRows(t *testing.T, count int) {
 }
 
 // runSync runs the streambed sync pipeline for the given duration.
-func runSync(t *testing.T, ctx context.Context, duration time.Duration) {
+// If statePath is empty, a temporary directory is used.
+func runSync(t *testing.T, ctx context.Context, duration time.Duration, statePath ...string) {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	// State store
-	stateDir := t.TempDir()
-	statePath := stateDir + "/state.db"
-	stateStore, err := state.Open(statePath)
+	// State store — use provided path or create a temp one.
+	path := ""
+	if len(statePath) > 0 && statePath[0] != "" {
+		path = statePath[0]
+	} else {
+		path = t.TempDir() + "/state.db"
+	}
+	stateStore, err := state.Open(path)
 	if err != nil {
 		t.Fatalf("open state store: %v", err)
 	}
@@ -184,8 +189,8 @@ func runSync(t *testing.T, ctx context.Context, duration time.Duration) {
 		t.Fatalf("setup replication slot: %v", err)
 	}
 
-	// Check state store for last flushed LSN
-	stateLSN, err := stateStore.GetFlushedLSN(slotName)
+	// Check state store for safest flushed LSN
+	stateLSN, err := stateStore.GetSafestFlushedLSN()
 	if err != nil {
 		t.Fatalf("get flushed LSN: %v", err)
 	}
@@ -203,7 +208,7 @@ func runSync(t *testing.T, ctx context.Context, duration time.Duration) {
 		flushRows, 5*time.Second, logger)
 
 	// Create consumer
-	consumer := wal.NewConsumer(pgConn, slotName, slotName, startLSN, nil, logger)
+	consumer := wal.NewConsumer(pgConn, slotName, slotName, startLSN, nil, logger, stateStore)
 
 	// Channels
 	events := make(chan wal.RowEvent, 1000)
@@ -525,8 +530,169 @@ func TestEndToEnd(t *testing.T) {
 	}
 	t.Logf("metadata JSON looks valid (%d bytes)", len(metaJSON))
 
-	// Cleanup slot before resume test
+	// Cleanup slot before next test
 	cleanup(t)
+}
+
+func TestEndToEndUpdateDelete(t *testing.T) {
+	skipIfNotAvailable(t)
+	ctx := context.Background()
+
+	// Clean state
+	cleanup(t)
+	clearS3Prefix(t)
+	setupTestTable(t)
+
+	// Set REPLICA IDENTITY so UPDATEs/DELETEs include old key values.
+	execSQL(t, "ALTER TABLE test_events REPLICA IDENTITY FULL")
+
+	createSlotAndPublication(t)
+
+	// Shared state store across all sync phases so LSN tracking persists
+	// and the consumer doesn't replay already-processed WAL events.
+	sharedStatePath := t.TempDir() + "/state.db"
+
+	// Insert 10 rows
+	t.Log("inserting 10 rows...")
+	insertRows(t, 10)
+
+	// Sync to flush inserts
+	t.Log("syncing inserts...")
+	runSync(t, ctx, 12*time.Second, sharedStatePath)
+
+	totalRows := countTotalParquetRows(t)
+	t.Logf("after insert: %d rows in parquet", totalRows)
+	if totalRows != 10 {
+		t.Fatalf("expected 10 rows after insert, got %d", totalRows)
+	}
+
+	// UPDATE 3 rows
+	t.Log("updating 3 rows...")
+	execSQL(t, "UPDATE test_events SET name = 'updated_0' WHERE id = 1")
+	execSQL(t, "UPDATE test_events SET name = 'updated_1', value = 999.99 WHERE id = 2")
+	execSQL(t, "UPDATE test_events SET name = 'updated_2' WHERE id = 3")
+
+	// Sync updates (COW should read-back + filter + rewrite)
+	t.Log("syncing updates...")
+	runSync(t, ctx, 12*time.Second, sharedStatePath)
+
+	// After UPDATE the COW rewrite should still have 10 rows (no rows gained/lost).
+	totalRows = countLatestSnapshotRows(t)
+	t.Logf("after update: %d rows in latest snapshot", totalRows)
+	if totalRows != 10 {
+		t.Fatalf("expected 10 rows after update, got %d", totalRows)
+	}
+
+	// DELETE 2 rows
+	t.Log("deleting 2 rows...")
+	execSQL(t, "DELETE FROM test_events WHERE id = 4")
+	execSQL(t, "DELETE FROM test_events WHERE id = 5")
+
+	// Sync deletes
+	t.Log("syncing deletes...")
+	runSync(t, ctx, 12*time.Second, sharedStatePath)
+
+	totalRows = countLatestSnapshotRows(t)
+	t.Logf("after delete: %d rows in latest snapshot", totalRows)
+	if totalRows != 8 {
+		t.Fatalf("expected 8 rows after delete, got %d", totalRows)
+	}
+
+	// DELETE all remaining rows
+	t.Log("deleting all remaining rows...")
+	execSQL(t, "DELETE FROM test_events")
+
+	t.Log("syncing delete-all...")
+	runSync(t, ctx, 12*time.Second, sharedStatePath)
+
+	totalRows = countLatestSnapshotRows(t)
+	t.Logf("after delete-all: %d rows in latest snapshot", totalRows)
+	if totalRows != 0 {
+		t.Fatalf("expected 0 rows after delete-all, got %d", totalRows)
+	}
+
+	cleanup(t)
+}
+
+// execSQL runs a single SQL statement against postgres.
+func execSQL(t *testing.T, sql string) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgconn.Connect(ctx, pgConnStr())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	result := conn.Exec(ctx, sql)
+	if _, err := result.ReadAll(); err != nil {
+		t.Fatalf("exec %q: %v", sql, err)
+	}
+}
+
+// countLatestSnapshotRows reads the latest snapshot's data files and counts
+// actual parquet rows. This is more accurate than countTotalParquetRows
+// because COW replaces old files — only the latest snapshot matters.
+func countLatestSnapshotRows(t *testing.T) int64 {
+	t.Helper()
+	ctx := context.Background()
+
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(s3Region))
+	if err != nil {
+		t.Fatalf("load aws config: %v", err)
+	}
+
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(minioEndpoint)
+		o.UsePathStyle = true
+		o.Credentials = credentials.NewStaticCredentialsProvider("minioadmin", "minioadmin", "")
+	})
+
+	s3Client, err := storage.NewS3Client(ctx, s3Bucket, s3Region, minioEndpoint)
+	if err != nil {
+		t.Fatalf("create s3 client: %v", err)
+	}
+
+	catalog := iceberg.NewCatalog(s3Client, s3Bucket, s3Prefix)
+	paths, err := catalog.GetDataFilePaths(ctx, "public", "test_events")
+	if err != nil {
+		t.Fatalf("get data file paths: %v", err)
+	}
+
+	var totalRows int64
+	for _, path := range paths {
+		// GetDataFilePaths returns paths relative to the table prefix,
+		// but they may be S3 URIs. Extract the key.
+		key := path
+		if idx := strings.Index(key, s3Bucket+"/"); idx >= 0 {
+			key = key[idx+len(s3Bucket)+1:]
+		}
+		// If it's a relative path, prepend the prefix.
+		if !strings.HasPrefix(key, s3Prefix) {
+			key = fmt.Sprintf("%s/public/test_events/%s", s3Prefix, key)
+		}
+
+		getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(s3Bucket),
+			Key:    aws.String(key),
+		})
+		if err != nil {
+			t.Fatalf("get %s: %v", key, err)
+		}
+		data, err := io.ReadAll(getOut.Body)
+		getOut.Body.Close()
+		if err != nil {
+			t.Fatalf("read %s: %v", key, err)
+		}
+
+		f, err := pqgo.OpenFile(bytes.NewReader(data), int64(len(data)))
+		if err != nil {
+			t.Fatalf("open parquet %s: %v", key, err)
+		}
+		totalRows += f.NumRows()
+		t.Logf("  snapshot file %s: %d rows", key, f.NumRows())
+	}
+	return totalRows
 }
 
 func TestEndToEndResume(t *testing.T) {
