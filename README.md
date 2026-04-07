@@ -177,11 +177,17 @@ go mod download
 go build -o streambed ./cmd/streambed
 
 # Run
+
 streambed sync \
-  --source-url "postgres://user:pass@localhost:5432/mydb" \
-  --s3-bucket my-bucket \
-  --s3-prefix warehouse \
-  --slot-name streambed_slot
+  --query-addr :5433 \
+  --source-url="postgres://postgres:test@localhost:5432/postgres" \
+  --s3-bucket="streambed" \
+  --s3-endpoint="http://localhost:9000" \
+  --s3-region="us-east-1" \
+  --s3-prefix="test"
+
+# then in another session start querying your Postgres data:
+psql -h localhost -U postgres -d postgres -p 5433
 ```
 
 ## Configuration
