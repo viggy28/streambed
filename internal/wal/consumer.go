@@ -23,7 +23,6 @@ type Consumer struct {
 	publication   string
 	decoder       *Decoder
 	startLSN      pglogrepl.LSN
-	clientXLogPos pglogrepl.LSN
 	logger        *slog.Logger
 	excludeTables map[string]bool
 	state         *state.Store
@@ -41,7 +40,6 @@ func NewConsumer(conn *pgconn.PgConn, slotName, publication string, startLSN pgl
 		publication:   publication,
 		decoder:       NewDecoder(logger),
 		startLSN:      startLSN,
-		clientXLogPos: startLSN,
 		logger:        logger,
 		excludeTables: exclude,
 		state:         state,
@@ -80,17 +78,13 @@ func (c *Consumer) Start(ctx context.Context, events chan<- RowEvent, ackCh <-ch
 	//       else min(receivedLSN, pendingMinLSN-1).
 	receivedLSN := c.startLSN
 	var pendingMinLSN pglogrepl.LSN
-	tableFlushLSN := make(map[string]pglogrepl.LSN)
-	flushLSN, err := c.state.GetFlushedLSN()
+	// tableFlushLSN is the per-table dedup cursor, keyed by "schema.table"
+	// to disambiguate tables with the same name in different schemas. An
+	// event with WALStart <= tableFlushLSN[key] has already been durably
+	// flushed to Iceberg and must be dropped on replay.
+	tableFlushLSN, err := c.state.GetLastFlushLSNs()
 	if err != nil {
-		return fmt.Errorf("error getting flush LSN for all tables: %w", err)
-	}
-	for table, lsnStr := range flushLSN {
-		lsn, err := pglogrepl.ParseLSN(lsnStr)
-		if err != nil {
-			return fmt.Errorf("parse LSN %q: %w", lsnStr, err)
-		}
-		tableFlushLSN[table] = lsn
+		return fmt.Errorf("load last-flush LSNs: %w", err)
 	}
 
 	// Load backfill filters. Any entry here means a resync has been
@@ -237,7 +231,7 @@ func (c *Consumer) Start(ctx context.Context, events chan<- RowEvent, ackCh <-ch
 						)
 					}
 				}
-				if storeLsn := tableFlushLSN[rel.Name]; storeLsn >= xld.WALStart {
+				if storeLsn := tableFlushLSN[key]; storeLsn >= xld.WALStart {
 					return rel, false
 				}
 				return rel, true
@@ -340,7 +334,6 @@ func (c *Consumer) Start(ctx context.Context, events chan<- RowEvent, ackCh <-ch
 			// whether it was forwarded, filtered, or bookkeeping.
 			// Everything at or before this point has now been observed.
 			endLSN := xld.WALStart + pglogrepl.LSN(len(xld.WALData))
-			c.clientXLogPos = endLSN
 			if endLSN > receivedLSN {
 				receivedLSN = endLSN
 			}

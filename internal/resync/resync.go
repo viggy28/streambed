@@ -211,7 +211,9 @@ func Run(ctx context.Context, opts Options) (Stats, error) {
 
 	// 5. Register the table in state (or refresh column count) and record
 	//    the backfill LSN so the sync consumer filters overlapping events.
-	if err := opts.State.RegisterTable(opts.Schema, opts.Table, len(columns), tmp.ConsistentPoint); err != nil {
+	//    RegisterTable leaves last_flush_lsn alone; the UpdateLastFlush
+	//    call below is what sets the dedup cursor to the snapshot LSN.
+	if err := opts.State.RegisterTable(opts.Schema, opts.Table, len(columns)); err != nil {
 		return stats, fmt.Errorf("register table in state: %w", err)
 	}
 	if err := opts.State.UpdateLastFlush(tmp.ConsistentPoint, opts.Schema, opts.Table); err != nil {

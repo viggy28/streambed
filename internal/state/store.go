@@ -36,11 +36,6 @@ func Open(path string) (*Store, error) {
 
 func createTables(db *sql.DB) error {
 	if _, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS replication_state (
-			slot_name    TEXT PRIMARY KEY,
-			flushed_lsn  TEXT NOT NULL,
-			updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
 		CREATE TABLE IF NOT EXISTS synced_tables (
 			schema_name    TEXT NOT NULL,
 			table_name     TEXT NOT NULL,
@@ -102,62 +97,45 @@ func containsCI(s, sub string) bool {
 	return false
 }
 
-func (s *Store) GetFlushedLSN() (map[string]string, error) {
+// GetLastFlushLSNs returns the per-table durable LSN cursor for every table
+// that has been flushed at least once. The map is keyed by "schema.table" so
+// callers can disambiguate tables with the same name in different schemas.
+// Tables that have been registered but never successfully flushed are
+// excluded — their last_flush_lsn is NULL and they have no dedup cursor yet.
+func (s *Store) GetLastFlushLSNs() (map[string]pglogrepl.LSN, error) {
 	rows, err := s.db.Query(
-		"SELECT table_name, last_flush_lsn FROM synced_tables where last_flush_lsn is NOT NULL",
+		`SELECT schema_name, table_name, last_flush_lsn FROM synced_tables WHERE last_flush_lsn IS NOT NULL`,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	tableFlushLSN := make(map[string]string)
-	var tableName, last_flush_lsn string
 
+	out := make(map[string]pglogrepl.LSN)
 	for rows.Next() {
-		if err := rows.Scan(&tableName, &last_flush_lsn); err != nil {
+		var schema, table, lsnStr string
+		if err := rows.Scan(&schema, &table, &lsnStr); err != nil {
 			return nil, err
 		}
-		tableFlushLSN[tableName] = last_flush_lsn
+		lsn, err := pglogrepl.ParseLSN(lsnStr)
+		if err != nil {
+			return nil, fmt.Errorf("parse last_flush_lsn %q for %s.%s: %w", lsnStr, schema, table, err)
+		}
+		out[schema+"."+table] = lsn
 	}
-
-	return tableFlushLSN, nil
+	return out, rows.Err()
 }
 
-func (s *Store) GetSafestFlushedLSN() (pglogrepl.LSN, error) {
-	var lsnStr string
-	// ideally we should find the minimum of last_flush_lsn_position
-	// since it's a string and need to be decoded to a position, I am using the last_flush timestamp
-	err := s.db.QueryRow(
-		"SELECT last_flush_lsn FROM synced_tables WHERE last_flush IS NOT NULL ORDER BY last_flush ASC LIMIT 1",
-	).Scan(&lsnStr)
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	lsn, err := pglogrepl.ParseLSN(lsnStr)
-	if err != nil {
-		return 0, fmt.Errorf("parse LSN %q: %w", lsnStr, err)
-	}
-	return lsn, nil
-}
-
-func (s *Store) SetFlushedLSN(slotName string, lsn pglogrepl.LSN) error {
+// RegisterTable ensures a row exists in synced_tables for (schema, table) and
+// updates its column_count. It deliberately does NOT touch last_flush_lsn:
+// that column is populated only by UpdateLastFlush after a successful flush,
+// so the dedup cursor never lies about what is durable.
+func (s *Store) RegisterTable(schema, table string, columnCount int) error {
 	_, err := s.db.Exec(`
-		INSERT INTO replication_state (slot_name, flushed_lsn, updated_at)
+		INSERT INTO synced_tables (schema_name, table_name, column_count)
 		VALUES (?, ?, ?)
-		ON CONFLICT(slot_name) DO UPDATE SET flushed_lsn = ?, updated_at = ?
-	`, slotName, lsn.String(), time.Now().UTC(), lsn.String(), time.Now().UTC())
-	return err
-}
-
-func (s *Store) RegisterTable(schema, table string, columnCount int, lsn pglogrepl.LSN) error {
-	_, err := s.db.Exec(`
-		INSERT INTO synced_tables (schema_name, table_name, column_count, last_flush_lsn)
-		VALUES (?, ?, ?, ?)
 		ON CONFLICT(schema_name, table_name) DO UPDATE SET column_count = ?
-	`, schema, table, columnCount, lsn.String(), columnCount)
+	`, schema, table, columnCount, columnCount)
 	return err
 }
 

@@ -189,16 +189,8 @@ func runSync(t *testing.T, ctx context.Context, duration time.Duration, statePat
 		t.Fatalf("setup replication slot: %v", err)
 	}
 
-	// Check state store for safest flushed LSN
-	stateLSN, err := stateStore.GetSafestFlushedLSN()
-	if err != nil {
-		t.Fatalf("get flushed LSN: %v", err)
-	}
-
+	// Slot position is the single source of truth for replay start.
 	startLSN := slotLSN
-	if stateLSN > startLSN {
-		startLSN = stateLSN
-	}
 
 	// Initialize Iceberg catalog
 	catalog := iceberg.NewCatalog(s3Client, s3Bucket, s3Prefix)

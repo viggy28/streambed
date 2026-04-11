@@ -128,8 +128,10 @@ func (w *Writer) buffer(event wal.RowEvent) bool {
 		}
 		w.buffers[key] = buf
 
-		// Register table in state store
-		w.state.RegisterTable(event.Schema, event.Table, len(event.Columns), event.WALStartLSN)
+		// Register table in state store. This only ensures a row exists
+		// for (schema, table) + column_count; last_flush_lsn stays NULL
+		// until UpdateLastFlush runs after a successful flush.
+		w.state.RegisterTable(event.Schema, event.Table, len(event.Columns))
 		w.logger.Info("new table discovered",
 			"schema", event.Schema,
 			"table", event.Table,

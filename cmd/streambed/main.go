@@ -247,32 +247,14 @@ func runSync(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("setup replication slot: %w", err)
 	}
 
-	// Check state store for last flushed LSN (may be more recent than slot)
-	stateLSN, err := stateStore.GetFlushedLSN()
-	if err != nil {
-		return fmt.Errorf("get flushed LSN from state: %w", err)
-	}
-	var minStoreLsn pglogrepl.LSN
-	for _, lsnStr := range stateLSN {
-		lsn, err := pglogrepl.ParseLSN(lsnStr)
-		if err != nil {
-			return fmt.Errorf("error parsing LSN: %s %v", lsnStr, err)
-		}
-		if minStoreLsn > lsn || minStoreLsn == 0 {
-			minStoreLsn = lsn
-		}
-	}
-
+	// The slot's confirmed_flush_lsn is the single source of truth for
+	// where to resume replay. The watermark ack (see specs/ack.md)
+	// guarantees the slot is never advanced past an unflushed event, so
+	// starting from it can never skip data. Per-table dedup cursors are
+	// still consulted by the consumer to suppress any events that replay
+	// past the slot but are already durable in Iceberg.
 	startLSN := slotLSN
-	if minStoreLsn > startLSN {
-		startLSN = minStoreLsn
-		logger.Info("resuming from state store LSN", "lsn", startLSN)
-	} else if minStoreLsn < startLSN && minStoreLsn != 0 {
-		logger.Warn("state store is behind slot position, some data may need re-sync",
-			"min_store_lsn", minStoreLsn,
-			"slot_lsn", startLSN,
-		)
-	}
+	logger.Info("resuming from slot position", "lsn", startLSN)
 
 	// Initialize Iceberg catalog
 	catalog := iceberg.NewCatalog(s3Client, cfg.S3Bucket, cfg.S3Prefix)
