@@ -614,6 +614,62 @@ func TestEndToEndUpdateDelete(t *testing.T) {
 	cleanup(t)
 }
 
+// TestEndToEndTruncate exercises TRUNCATE handling: rows are inserted and
+// flushed, then a TRUNCATE is replicated and the next sync must observe
+// a latest snapshot with zero rows. A final INSERT verifies the table is
+// still writable afterwards.
+func TestEndToEndTruncate(t *testing.T) {
+	skipIfNotAvailable(t)
+	ctx := context.Background()
+
+	cleanup(t)
+	clearS3Prefix(t)
+	setupTestTable(t)
+	execSQL(t, "ALTER TABLE test_events REPLICA IDENTITY FULL")
+
+	createSlotAndPublication(t)
+
+	sharedStatePath := t.TempDir() + "/state.db"
+
+	t.Log("inserting 20 rows...")
+	insertRows(t, 20)
+
+	t.Log("syncing initial inserts...")
+	runSync(t, ctx, 12*time.Second, sharedStatePath)
+
+	rows := countLatestSnapshotRows(t)
+	t.Logf("after insert: %d rows in latest snapshot", rows)
+	if rows != 20 {
+		t.Fatalf("expected 20 rows after insert, got %d", rows)
+	}
+
+	t.Log("TRUNCATE test_events...")
+	execSQL(t, "TRUNCATE test_events")
+
+	t.Log("syncing truncate...")
+	runSync(t, ctx, 12*time.Second, sharedStatePath)
+
+	rows = countLatestSnapshotRows(t)
+	t.Logf("after truncate: %d rows in latest snapshot", rows)
+	if rows != 0 {
+		t.Fatalf("expected 0 rows after truncate, got %d", rows)
+	}
+
+	t.Log("inserting 5 fresh rows after truncate...")
+	insertRows(t, 5)
+
+	t.Log("syncing post-truncate inserts...")
+	runSync(t, ctx, 12*time.Second, sharedStatePath)
+
+	rows = countLatestSnapshotRows(t)
+	t.Logf("after post-truncate insert: %d rows in latest snapshot", rows)
+	if rows != 5 {
+		t.Fatalf("expected 5 rows after post-truncate insert, got %d", rows)
+	}
+
+	cleanup(t)
+}
+
 // execSQL runs a single SQL statement against postgres.
 func execSQL(t *testing.T, sql string) {
 	t.Helper()

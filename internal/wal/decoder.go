@@ -48,8 +48,7 @@ func (d *Decoder) Decode(msg pglogrepl.Message) (interface{}, error) {
 		return d.decodeDelete(m)
 
 	case *pglogrepl.TruncateMessage:
-		d.logger.Warn("TRUNCATE message received, skipping (Phase 2)")
-		return nil, nil
+		return d.decodeTruncate(m), nil
 
 	case *pglogrepl.TypeMessage:
 		return nil, nil
@@ -174,6 +173,21 @@ func (d *Decoder) decodeUpdate(m *pglogrepl.UpdateMessage) (*UpdateMessage, erro
 		OldKey:     oldKey,
 		NewRow:     newRow,
 	}, nil
+}
+
+// decodeTruncate captures the list of relations affected by a pgoutput
+// Truncate message. Unknown relation IDs are logged and dropped here so
+// the consumer only sees relations we have metadata for.
+func (d *Decoder) decodeTruncate(m *pglogrepl.TruncateMessage) *TruncateMessage {
+	ids := make([]uint32, 0, len(m.RelationIDs))
+	for _, relID := range m.RelationIDs {
+		if _, ok := d.relations[relID]; !ok {
+			d.logger.Warn("TRUNCATE for unknown relation, dropping", "relation_id", relID)
+			continue
+		}
+		ids = append(ids, relID)
+	}
+	return &TruncateMessage{RelationIDs: ids}
 }
 
 // decodeDelete extracts the key tuple from a pgoutput delete message.

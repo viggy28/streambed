@@ -82,6 +82,13 @@ func (w *Writer) Start(ctx context.Context, events <-chan wal.RowEvent, ackCh ch
 				w.logger.Info("flushing all...")
 				return w.flushAll(context.Background(), ackCh)
 			}
+			if event.Op == wal.OpTruncate {
+				if err := w.truncate(ctx, event, ackCh); err != nil {
+					w.logger.Error("truncate error", "table", fmt.Sprintf("%s.%s", event.Schema, event.Table), "error", err)
+					return err
+				}
+				continue
+			}
 			transitioned := w.buffer(event)
 
 			key := fmt.Sprintf("%s.%s", event.Schema, event.Table)
@@ -325,6 +332,72 @@ func (w *Writer) flush(ctx context.Context, key string, ackCh chan<- pglogrepl.L
 	// so the consumer can advance its standby ack.
 	w.sendPendingMin(ackCh)
 
+	return nil
+}
+
+// truncate handles a TRUNCATE event for a single table by committing an
+// empty-replacement Iceberg snapshot at the TRUNCATE's LSN.
+//
+// Any rows or deletes currently buffered for the table are discarded —
+// a TRUNCATE that arrives after buffered INSERTs obliterates those
+// INSERTs anyway, and any INSERTs that arrive *after* the TRUNCATE are
+// already tagged with a later LSN and land in a fresh buffer.
+//
+// If the table has never been flushed yet (no Iceberg table on disk),
+// the TRUNCATE is a no-op: there is nothing to erase, and the next
+// INSERT will create the table from scratch.
+func (w *Writer) truncate(ctx context.Context, event wal.RowEvent, ackCh chan<- pglogrepl.LSN) error {
+	key := fmt.Sprintf("%s.%s", event.Schema, event.Table)
+	start := time.Now()
+
+	// Drop any in-flight state for this table. The rows are about to
+	// be erased by the snapshot we're about to write, so there is
+	// nothing to preserve.
+	if buf, exists := w.buffers[key]; exists {
+		buf.Rows = nil
+		buf.Deletes = nil
+		buf.FirstLSN = 0
+		if event.WALStartLSN > buf.LastLSN {
+			buf.LastLSN = event.WALStartLSN
+		}
+	}
+
+	tableExists, err := w.catalog.TableExists(ctx, event.Schema, event.Table)
+	if err != nil {
+		return fmt.Errorf("check table %s for truncate: %w", key, err)
+	}
+	if !tableExists {
+		w.logger.Info("truncate on not-yet-created table, no-op",
+			"table", key,
+			"lsn", event.WALStartLSN.String(),
+		)
+		// Still advance durable LSN so restart dedup doesn't replay
+		// this TRUNCATE and any pre-TRUNCATE events forever.
+		if err := w.state.UpdateLastFlush(event.WALStartLSN, event.Schema, event.Table); err != nil {
+			return fmt.Errorf("update last_flush after no-op truncate for %s: %w", key, err)
+		}
+		w.sendPendingMin(ackCh)
+		return nil
+	}
+
+	// replace=true, dataFile=nil → catalog writes an empty-manifest
+	// snapshot via commitEmptyTable. This is exactly "the table is
+	// now empty" in Iceberg terms.
+	if err := w.catalog.CommitChangeset(ctx, event.Schema, event.Table, nil, nil, true); err != nil {
+		return fmt.Errorf("commit empty snapshot for truncate %s: %w", key, err)
+	}
+
+	if err := w.state.UpdateLastFlush(event.WALStartLSN, event.Schema, event.Table); err != nil {
+		return fmt.Errorf("update last_flush after truncate for %s: %w", key, err)
+	}
+
+	w.logger.Info("truncate committed",
+		"table", key,
+		"lsn", event.WALStartLSN.String(),
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
+
+	w.sendPendingMin(ackCh)
 	return nil
 }
 

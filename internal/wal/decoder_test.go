@@ -360,6 +360,70 @@ func TestDecodeDelete_NoOldTuple(t *testing.T) {
 	}
 }
 
+func TestDecodeTruncate_SingleTable(t *testing.T) {
+	d := testDecoder()
+	registerTwoColRelation(d, 10)
+
+	result, err := d.Decode(&pglogrepl.TruncateMessage{
+		RelationNum: 1,
+		RelationIDs: []uint32{10},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, ok := result.(*TruncateMessage)
+	if !ok {
+		t.Fatalf("expected *TruncateMessage, got %T", result)
+	}
+	if len(tr.RelationIDs) != 1 || tr.RelationIDs[0] != 10 {
+		t.Errorf("RelationIDs=%v, want [10]", tr.RelationIDs)
+	}
+}
+
+func TestDecodeTruncate_MultiTable(t *testing.T) {
+	d := testDecoder()
+	registerTwoColRelation(d, 20)
+	d.Decode(&pglogrepl.RelationMessage{
+		RelationID:   21,
+		Namespace:    "public",
+		RelationName: "other",
+		Columns: []*pglogrepl.RelationMessageColumn{
+			{Flags: 1, Name: "id", DataType: 23},
+		},
+	})
+
+	result, err := d.Decode(&pglogrepl.TruncateMessage{
+		RelationNum: 2,
+		RelationIDs: []uint32{20, 21},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := result.(*TruncateMessage)
+	if len(tr.RelationIDs) != 2 {
+		t.Fatalf("expected 2 relations, got %d", len(tr.RelationIDs))
+	}
+}
+
+// A TRUNCATE carrying a relation the decoder hasn't seen yet is dropped
+// at decode time — the consumer only sees known relations.
+func TestDecodeTruncate_DropsUnknownRelation(t *testing.T) {
+	d := testDecoder()
+	registerTwoColRelation(d, 30)
+
+	result, err := d.Decode(&pglogrepl.TruncateMessage{
+		RelationNum: 2,
+		RelationIDs: []uint32{30, 99999},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := result.(*TruncateMessage)
+	if len(tr.RelationIDs) != 1 || tr.RelationIDs[0] != 30 {
+		t.Errorf("RelationIDs=%v, want [30]", tr.RelationIDs)
+	}
+}
+
 func TestDecodeUpdate_UnknownRelation(t *testing.T) {
 	d := testDecoder()
 	_, err := d.Decode(&pglogrepl.UpdateMessage{
