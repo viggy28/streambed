@@ -70,7 +70,16 @@ func (c *Consumer) Start(ctx context.Context, events chan<- RowEvent, ackCh <-ch
 	)
 
 	nextStandbyDeadline := time.Now().Add(standbyTimeout)
-	var flushedLSN pglogrepl.LSN
+	//   receivedLSN   — highest WAL position the consumer has observed
+	//                   from Postgres (advanced on every XLogData and on
+	//                   keepalives via pkm.ServerWALEnd).
+	//   pendingMinLSN — smallest FirstLSN across non-empty writer buffers,
+	//                   pushed on ackCh by the writer. 0 means ∞.
+	//
+	// ack = receivedLSN when pendingMinLSN == 0,
+	//       else min(receivedLSN, pendingMinLSN-1).
+	receivedLSN := c.startLSN
+	var pendingMinLSN pglogrepl.LSN
 	tableFlushLSN := make(map[string]pglogrepl.LSN)
 	flushLSN, err := c.state.GetFlushedLSN()
 	if err != nil {
@@ -107,26 +116,39 @@ func (c *Consumer) Start(ctx context.Context, events chan<- RowEvent, ackCh <-ch
 		default:
 		}
 
-		// Check for flushed LSN updates (non-blocking)
+		// Drain pendingMinLSN updates from the writer (non-blocking).
+		// The writer publishes on empty→non-empty transitions and after
+		// every flush; we keep only the latest value.
 		select {
 		case lsn := <-ackCh:
-			flushedLSN = lsn
+			pendingMinLSN = lsn
 		default:
 		}
 
-		// Send standby status if needed
+		// Send standby status if needed.
 		if time.Now().After(nextStandbyDeadline) {
+			ack := receivedLSN
+			if pendingMinLSN != 0 {
+				hold := pendingMinLSN - 1
+				if hold < ack {
+					ack = hold
+				}
+			}
 			err := pglogrepl.SendStandbyStatusUpdate(ctx, c.conn,
 				pglogrepl.StandbyStatusUpdate{
-					WALWritePosition: flushedLSN,
-					WALFlushPosition: flushedLSN,
-					WALApplyPosition: flushedLSN,
+					WALWritePosition: ack,
+					WALFlushPosition: ack,
+					WALApplyPosition: ack,
 				},
 			)
 			if err != nil {
 				return fmt.Errorf("send standby status: %w", err)
 			}
-			c.logger.Debug("standby status sent", "flushed_lsn", flushedLSN)
+			c.logger.Debug("standby status sent",
+				"ack", ack,
+				"received_lsn", receivedLSN,
+				"pending_min_lsn", pendingMinLSN,
+			)
 			nextStandbyDeadline = time.Now().Add(standbyTimeout)
 		}
 
@@ -153,6 +175,12 @@ func (c *Consumer) Start(ctx context.Context, events chan<- RowEvent, ackCh <-ch
 			pkm, err := pglogrepl.ParsePrimaryKeepaliveMessage(copyData.Data[1:])
 			if err != nil {
 				return fmt.Errorf("parse keepalive: %w", err)
+			}
+			// Keepalives carry the server's current WAL end; use it to
+			// advance receivedLSN past any idle gap so the slot can move
+			// even when no events are flowing.
+			if pkm.ServerWALEnd > receivedLSN {
+				receivedLSN = pkm.ServerWALEnd
 			}
 			if pkm.ReplyRequested {
 				nextStandbyDeadline = time.Time{} // force immediate reply
@@ -308,7 +336,14 @@ func (c *Consumer) Start(ctx context.Context, events chan<- RowEvent, ackCh <-ch
 				// no-op
 			}
 
-			c.clientXLogPos = xld.WALStart + pglogrepl.LSN(len(xld.WALData))
+			// Advance receivedLSN past this message regardless of
+			// whether it was forwarded, filtered, or bookkeeping.
+			// Everything at or before this point has now been observed.
+			endLSN := xld.WALStart + pglogrepl.LSN(len(xld.WALData))
+			c.clientXLogPos = endLSN
+			if endLSN > receivedLSN {
+				receivedLSN = endLSN
+			}
 		}
 	}
 }

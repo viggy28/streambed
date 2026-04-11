@@ -40,6 +40,11 @@ type tableBuffer struct {
 	// j-th key column for the i-th pending delete.
 	Deletes [][]pqbuilder.Value
 	LastLSN pglogrepl.LSN
+	// FirstLSN is the WAL position of the oldest event currently buffered
+	// for this table. Set on the empty→non-empty transition, cleared on
+	// flush. It drives the writer's pendingMinLSN watermark that the
+	// consumer uses to compute a safe standby ack. Zero means empty.
+	FirstLSN pglogrepl.LSN
 }
 
 func NewWriter(
@@ -77,7 +82,7 @@ func (w *Writer) Start(ctx context.Context, events <-chan wal.RowEvent, ackCh ch
 				w.logger.Info("flushing all...")
 				return w.flushAll(context.Background(), ackCh)
 			}
-			w.buffer(event)
+			transitioned := w.buffer(event)
 
 			key := fmt.Sprintf("%s.%s", event.Schema, event.Table)
 			b := w.buffers[key]
@@ -86,6 +91,11 @@ func (w *Writer) Start(ctx context.Context, events <-chan wal.RowEvent, ackCh ch
 					w.logger.Error("flush error", "table", key, "error", err)
 					return err
 				}
+			} else if transitioned {
+				// A previously-empty buffer just took its first event.
+				// pendingMinLSN may have decreased (or left ∞) — tell the
+				// consumer so its standby ack can be held back.
+				w.sendPendingMin(ackCh)
 			}
 
 		case <-ticker.C:
@@ -101,7 +111,11 @@ func (w *Writer) Start(ctx context.Context, events <-chan wal.RowEvent, ackCh ch
 	}
 }
 
-func (w *Writer) buffer(event wal.RowEvent) {
+// buffer appends an event to the per-table buffer. Returns true if this
+// append transitioned the buffer from empty to non-empty (i.e. FirstLSN
+// was just set), which the caller uses to decide whether to emit a new
+// pendingMinLSN watermark on ackCh.
+func (w *Writer) buffer(event wal.RowEvent) bool {
 	key := fmt.Sprintf("%s.%s", event.Schema, event.Table)
 	buf, exists := w.buffers[key]
 	if !exists {
@@ -137,6 +151,10 @@ func (w *Writer) buffer(event wal.RowEvent) {
 		)
 	}
 
+	// Capture pre-append emptiness so we can detect the empty→non-empty
+	// transition after appending the row/delete below.
+	wasEmpty := len(buf.Rows) == 0 && len(buf.Deletes) == 0
+
 	// Append a full data row (for INSERT and UPDATE).
 	if event.Op == wal.OpInsert || event.Op == wal.OpUpdate {
 		row := make([]pqbuilder.Value, len(event.Values))
@@ -157,6 +175,13 @@ func (w *Writer) buffer(event wal.RowEvent) {
 	if event.WALStartLSN > buf.LastLSN {
 		buf.LastLSN = event.WALStartLSN
 	}
+
+	nowNonEmpty := len(buf.Rows) > 0 || len(buf.Deletes) > 0
+	transitioned := wasEmpty && nowNonEmpty
+	if transitioned {
+		buf.FirstLSN = event.WALStartLSN
+	}
+	return transitioned
 }
 
 func (w *Writer) flush(ctx context.Context, key string, ackCh chan<- pglogrepl.LSN) error {
@@ -276,32 +301,6 @@ func (w *Writer) flush(ctx context.Context, key string, ackCh chan<- pglogrepl.L
 		return fmt.Errorf("unable to set flushed LSN in the store %s: %w", buf.LastLSN.String(), err)
 	}
 
-	// Send leastLSN (safest unflushed) to consumer for standby status.
-	var leastLSN pglogrepl.LSN
-	var maxLSN pglogrepl.LSN
-	for _, row := range w.buffers {
-		if row.LastLSN == 0 {
-			continue
-		}
-		if row.LastLSN > maxLSN {
-			maxLSN = row.LastLSN
-		}
-		if len(row.Rows) == 0 && len(row.Deletes) == 0 {
-			continue
-		}
-		if leastLSN > row.LastLSN || leastLSN == 0 {
-			leastLSN = row.LastLSN
-		}
-	}
-	if leastLSN == 0 {
-		leastLSN = maxLSN
-	}
-
-	select {
-	case ackCh <- leastLSN:
-	default:
-	}
-
 	duration := time.Since(start)
 	var dataBytes int64
 	if dataFile != nil {
@@ -319,8 +318,40 @@ func (w *Writer) flush(ctx context.Context, key string, ackCh chan<- pglogrepl.L
 
 	buf.Rows = nil
 	buf.Deletes = nil
+	buf.FirstLSN = 0
+
+	// The buffer is now empty; pendingMinLSN may have advanced (or gone
+	// to ∞ if this was the last non-empty buffer). Publish the new value
+	// so the consumer can advance its standby ack.
+	w.sendPendingMin(ackCh)
 
 	return nil
+}
+
+// computePendingMinLSN returns the smallest FirstLSN across all buffers
+// that currently hold unflushed events. Returns 0 (sentinel for ∞) when
+// every buffer is empty.
+func (w *Writer) computePendingMinLSN() pglogrepl.LSN {
+	var min pglogrepl.LSN
+	for _, buf := range w.buffers {
+		if buf.FirstLSN == 0 {
+			continue
+		}
+		if min == 0 || buf.FirstLSN < min {
+			min = buf.FirstLSN
+		}
+	}
+	return min
+}
+
+// sendPendingMin publishes the current pendingMinLSN watermark to the
+// consumer. Non-blocking: if ackCh is full, the stale value in the
+// channel will be superseded by the next update anyway.
+func (w *Writer) sendPendingMin(ackCh chan<- pglogrepl.LSN) {
+	select {
+	case ackCh <- w.computePendingMinLSN():
+	default:
+	}
 }
 
 // readExistingRows downloads all current data files for a table from S3
