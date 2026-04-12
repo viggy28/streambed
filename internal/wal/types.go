@@ -61,6 +61,13 @@ type DeleteMessage struct {
 	OldKey     []ColumnValue
 }
 
+// TruncateMessage represents a TRUNCATE affecting one or more tables.
+// A single pgoutput Truncate carries every relation that was truncated
+// in the same SQL statement (TRUNCATE a, b, c).
+type TruncateMessage struct {
+	RelationIDs []uint32
+}
+
 // Op identifies the kind of change a RowEvent represents.
 type Op uint8
 
@@ -68,6 +75,11 @@ const (
 	OpInsert Op = iota
 	OpUpdate
 	OpDelete
+	// OpTruncate represents a TRUNCATE of a single table. The event
+	// carries no row data; the writer handles it by discarding any
+	// buffered rows for the table and committing an empty-replacement
+	// Iceberg snapshot at the TRUNCATE's WAL position.
+	OpTruncate
 )
 
 func (o Op) String() string {
@@ -78,6 +90,8 @@ func (o Op) String() string {
 		return "UPDATE"
 	case OpDelete:
 		return "DELETE"
+	case OpTruncate:
+		return "TRUNCATE"
 	default:
 		return "UNKNOWN"
 	}

@@ -329,6 +329,28 @@ func (c *Consumer) Start(ctx context.Context, events chan<- RowEvent, ackCh <-ch
 					return err
 				}
 
+			case *TruncateMessage:
+				c.logger.Info("received truncate message",
+					"lsn", xld.WALStart.String(),
+					"relations", len(v.RelationIDs),
+				)
+				for _, relID := range v.RelationIDs {
+					rel, ok := shouldProcess(relID)
+					if !ok {
+						continue
+					}
+					if err := sendEvent(RowEvent{
+						Schema:      rel.Namespace,
+						Table:       rel.Name,
+						Columns:     rel.Columns,
+						KeyColumns:  rel.KeyColumnIndexes,
+						Op:          OpTruncate,
+						WALStartLSN: xld.WALStart,
+					}); err != nil {
+						return err
+					}
+				}
+
 			case *pglogrepl.CommitMessage:
 				c.logger.Info("received commit message", "commitLSN", v.CommitLSN.String())
 
