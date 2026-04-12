@@ -202,8 +202,8 @@ func (c *Catalog) GetDataFilePaths(ctx context.Context, schema, table string) ([
 // CommitSnapshot appends a new data file via a new Iceberg snapshot.
 // This is a thin wrapper around CommitChangeset for append-only callers
 // (see resync and initial backfill paths).
-func (c *Catalog) CommitSnapshot(ctx context.Context, schema, table string, dataFile DataFile) error {
-	return c.CommitChangeset(ctx, schema, table, &dataFile, nil, false)
+func (c *Catalog) CommitSnapshot(ctx context.Context, schema, table string, dataFile DataFile, flushLSN string) error {
+	return c.CommitChangeset(ctx, schema, table, &dataFile, nil, false, flushLSN)
 }
 
 // CommitChangeset atomically adds one snapshot that may contain a data
@@ -233,6 +233,7 @@ func (c *Catalog) CommitChangeset(
 	dataFile *DataFile,
 	eqDel *EqDeleteFile,
 	replace bool,
+	flushLSN string,
 ) error {
 	if dataFile == nil && eqDel == nil && !replace {
 		return fmt.Errorf("commit changeset: both data and delete are nil")
@@ -241,7 +242,7 @@ func (c *Catalog) CommitChangeset(
 	// COW with no data file at all (shouldn't happen now that the writer
 	// always writes a Parquet file, but kept as a safety net).
 	if replace && dataFile == nil {
-		return c.commitEmptyTable(ctx, schema, table)
+		return c.commitEmptyTable(ctx, schema, table, flushLSN)
 	}
 	basePath := c.tablePath(schema, table)
 
@@ -391,6 +392,9 @@ func (c *Catalog) CommitChangeset(
 	default:
 		summary["operation"] = "append"
 	}
+	if flushLSN != "" {
+		summary["streambed.last_flush_lsn"] = flushLSN
+	}
 	if replace {
 		// Overwrite: total-records is just what's in this snapshot.
 		summary["total-records"] = strconv.FormatInt(addedRows, 10)
@@ -441,7 +445,7 @@ func (c *Catalog) CommitChangeset(
 // effectively marking the table as "exists but has no data". This is used when
 // a COW delete removes all rows — it avoids both iceberg-go's record_count>0
 // validation and DuckDB's empty-manifest-list crash.
-func (c *Catalog) commitEmptyTable(ctx context.Context, schema, table string) error {
+func (c *Catalog) commitEmptyTable(ctx context.Context, schema, table, flushLSN string) error {
 	basePath := c.tablePath(schema, table)
 
 	hintKey := path.Join(basePath, "metadata", "version-hint.text")
@@ -475,6 +479,15 @@ func (c *Catalog) commitEmptyTable(ctx context.Context, schema, table string) er
 	metadata.Snapshots = []snapshot{}
 	metadata.SnapshotLog = []snapshotLogEntry{}
 	metadata.Refs = map[string]interface{}{}
+	// Persist flushLSN in table properties since there are no snapshots
+	// to carry it in the summary. GetSnapshotFlushLSN reads this as a
+	// fallback when current-snapshot-id == -1.
+	if flushLSN != "" {
+		if metadata.Properties == nil {
+			metadata.Properties = map[string]string{}
+		}
+		metadata.Properties["streambed.last_flush_lsn"] = flushLSN
+	}
 	metadata.MetadataLog = append(metadata.MetadataLog, metadataLogEntry{
 		TimestampMS:  metadata.LastUpdatedMS,
 		MetadataFile: fmt.Sprintf("s3://%s/%s", c.bucket, currentMetaKey),
@@ -490,6 +503,53 @@ func (c *Catalog) commitEmptyTable(ctx context.Context, schema, table string) er
 		return err
 	}
 	return c.storage.PutObject(ctx, hintKey, []byte(strconv.Itoa(newVersion)), "text/plain")
+}
+
+// GetSnapshotFlushLSN reads the streambed.last_flush_lsn from the current
+// Iceberg snapshot's summary (or from table properties for empty tables).
+// Returns ("", false, nil) if the table exists but has no recorded LSN.
+// Returns an error if the table doesn't exist or metadata is unreadable.
+func (c *Catalog) GetSnapshotFlushLSN(ctx context.Context, schema, table string) (string, bool, error) {
+	basePath := c.tablePath(schema, table)
+
+	hintKey := path.Join(basePath, "metadata", "version-hint.text")
+	hintData, err := c.storage.GetObject(ctx, hintKey)
+	if err != nil {
+		return "", false, fmt.Errorf("read version-hint: %w", err)
+	}
+	version, err := strconv.Atoi(string(hintData))
+	if err != nil {
+		return "", false, fmt.Errorf("parse version hint: %w", err)
+	}
+
+	metaKey := path.Join(basePath, "metadata", fmt.Sprintf("v%d.metadata.json", version))
+	metaData, err := c.storage.GetObject(ctx, metaKey)
+	if err != nil {
+		return "", false, fmt.Errorf("read metadata: %w", err)
+	}
+	var metadata tableMetadata
+	if err := json.Unmarshal(metaData, &metadata); err != nil {
+		return "", false, fmt.Errorf("parse metadata: %w", err)
+	}
+
+	// Empty table (post-TRUNCATE / commitEmptyTable): LSN is in properties.
+	if metadata.CurrentSnapshotID <= 0 {
+		if lsn, ok := metadata.Properties["streambed.last_flush_lsn"]; ok {
+			return lsn, true, nil
+		}
+		return "", false, nil
+	}
+
+	// Find current snapshot and read summary.
+	for _, snap := range metadata.Snapshots {
+		if snap.SnapshotID == metadata.CurrentSnapshotID {
+			if lsn, ok := snap.Summary["streambed.last_flush_lsn"]; ok {
+				return lsn, true, nil
+			}
+			return "", false, nil
+		}
+	}
+	return "", false, nil
 }
 
 // readManifestList reads a manifest list Avro file using iceberg-go.

@@ -189,26 +189,39 @@ func runSync(t *testing.T, ctx context.Context, duration time.Duration, statePat
 		t.Fatalf("setup replication slot: %v", err)
 	}
 
-	// Check state store for safest flushed LSN
-	stateLSN, err := stateStore.GetSafestFlushedLSN()
-	if err != nil {
-		t.Fatalf("get flushed LSN: %v", err)
-	}
-
 	startLSN := slotLSN
-	if stateLSN > startLSN {
-		startLSN = stateLSN
-	}
 
 	// Initialize Iceberg catalog
 	catalog := iceberg.NewCatalog(s3Client, s3Bucket, s3Prefix)
+
+	// Read per-table flush LSNs from Iceberg for dedup on restart.
+	tableFlushLSN := make(map[string]pglogrepl.LSN)
+	registeredTables, err := stateStore.GetRegisteredTables()
+	if err != nil {
+		t.Fatalf("get registered tables: %v", err)
+	}
+	for _, rt := range registeredTables {
+		exists, err := catalog.TableExists(ctx, rt.Schema, rt.Table)
+		if err != nil || !exists {
+			continue
+		}
+		lsnStr, found, err := catalog.GetSnapshotFlushLSN(ctx, rt.Schema, rt.Table)
+		if err != nil || !found {
+			continue
+		}
+		lsn, err := pglogrepl.ParseLSN(lsnStr)
+		if err != nil {
+			continue
+		}
+		tableFlushLSN[fmt.Sprintf("%s.%s", rt.Schema, rt.Table)] = lsn
+	}
 
 	// Initialize writer
 	writer := iceberg.NewWriter(catalog, s3Client, stateStore, slotName,
 		flushRows, 5*time.Second, logger)
 
 	// Create consumer
-	consumer := wal.NewConsumer(pgConn, slotName, slotName, startLSN, nil, logger, stateStore)
+	consumer := wal.NewConsumer(pgConn, slotName, slotName, startLSN, nil, logger, stateStore, tableFlushLSN)
 
 	// Channels
 	events := make(chan wal.RowEvent, 1000)
@@ -666,6 +679,56 @@ func TestEndToEndTruncate(t *testing.T) {
 	if rows != 5 {
 		t.Fatalf("expected 5 rows after post-truncate insert, got %d", rows)
 	}
+
+	cleanup(t)
+}
+
+// TestEndToEndSnapshotSummaryLSN verifies that after a flush, the Iceberg
+// snapshot summary contains "streambed.last_flush_lsn" and that it can be
+// read back via GetSnapshotFlushLSN. This is the foundation for startup
+// reconciliation (Iceberg is the source of truth for dedup cursors).
+func TestEndToEndSnapshotSummaryLSN(t *testing.T) {
+	skipIfNotAvailable(t)
+	ctx := context.Background()
+
+	cleanup(t)
+	clearS3Prefix(t)
+	setupTestTable(t)
+	createSlotAndPublication(t)
+
+	sharedStatePath := t.TempDir() + "/state.db"
+
+	t.Log("inserting 10 rows...")
+	insertRows(t, 10)
+
+	t.Log("syncing...")
+	runSync(t, ctx, 12*time.Second, sharedStatePath)
+
+	// Read the snapshot summary LSN via the catalog
+	storageClient, err := storage.NewS3Client(ctx, s3Bucket, s3Region, minioEndpoint)
+	if err != nil {
+		t.Fatalf("create S3 client: %v", err)
+	}
+	catalog := iceberg.NewCatalog(storageClient, s3Bucket, s3Prefix)
+
+	lsnStr, found, err := catalog.GetSnapshotFlushLSN(ctx, "public", "test_events")
+	if err != nil {
+		t.Fatalf("GetSnapshotFlushLSN: %v", err)
+	}
+	if !found {
+		t.Fatal("expected streambed.last_flush_lsn in snapshot summary, not found")
+	}
+	if lsnStr == "" {
+		t.Fatal("streambed.last_flush_lsn is empty")
+	}
+	lsn, err := pglogrepl.ParseLSN(lsnStr)
+	if err != nil {
+		t.Fatalf("parse LSN %q from summary: %v", lsnStr, err)
+	}
+	if lsn == 0 {
+		t.Fatal("streambed.last_flush_lsn is zero")
+	}
+	t.Logf("snapshot summary streambed.last_flush_lsn = %s", lsn)
 
 	cleanup(t)
 }

@@ -136,7 +136,7 @@ func (w *Writer) buffer(event wal.RowEvent) bool {
 		w.buffers[key] = buf
 
 		// Register table in state store
-		w.state.RegisterTable(event.Schema, event.Table, len(event.Columns), event.WALStartLSN)
+		w.state.RegisterTable(event.Schema, event.Table, len(event.Columns))
 		w.logger.Info("new table discovered",
 			"schema", event.Schema,
 			"table", event.Table,
@@ -298,14 +298,8 @@ func (w *Writer) flush(ctx context.Context, key string, ackCh chan<- pglogrepl.L
 	}
 
 	// Commit snapshot.
-	if err := w.catalog.CommitChangeset(ctx, buf.Schema, buf.Table, dataFile, nil, replace); err != nil {
+	if err := w.catalog.CommitChangeset(ctx, buf.Schema, buf.Table, dataFile, nil, replace, buf.LastLSN.String()); err != nil {
 		return fmt.Errorf("commit snapshot for %s: %w", key, err)
-	}
-
-	w.logger.Info("syncing last LSN to state", "LSN", buf.LastLSN.String())
-
-	if err := w.state.UpdateLastFlush(buf.LastLSN, buf.Schema, buf.Table); err != nil {
-		return fmt.Errorf("unable to set flushed LSN in the store %s: %w", buf.LastLSN.String(), err)
 	}
 
 	duration := time.Since(start)
@@ -371,11 +365,6 @@ func (w *Writer) truncate(ctx context.Context, event wal.RowEvent, ackCh chan<- 
 			"table", key,
 			"lsn", event.WALStartLSN.String(),
 		)
-		// Still advance durable LSN so restart dedup doesn't replay
-		// this TRUNCATE and any pre-TRUNCATE events forever.
-		if err := w.state.UpdateLastFlush(event.WALStartLSN, event.Schema, event.Table); err != nil {
-			return fmt.Errorf("update last_flush after no-op truncate for %s: %w", key, err)
-		}
 		w.sendPendingMin(ackCh)
 		return nil
 	}
@@ -383,12 +372,8 @@ func (w *Writer) truncate(ctx context.Context, event wal.RowEvent, ackCh chan<- 
 	// replace=true, dataFile=nil → catalog writes an empty-manifest
 	// snapshot via commitEmptyTable. This is exactly "the table is
 	// now empty" in Iceberg terms.
-	if err := w.catalog.CommitChangeset(ctx, event.Schema, event.Table, nil, nil, true); err != nil {
+	if err := w.catalog.CommitChangeset(ctx, event.Schema, event.Table, nil, nil, true, event.WALStartLSN.String()); err != nil {
 		return fmt.Errorf("commit empty snapshot for truncate %s: %w", key, err)
-	}
-
-	if err := w.state.UpdateLastFlush(event.WALStartLSN, event.Schema, event.Table); err != nil {
-		return fmt.Errorf("update last_flush after truncate for %s: %w", key, err)
 	}
 
 	w.logger.Info("truncate committed",
