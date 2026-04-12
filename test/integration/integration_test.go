@@ -54,6 +54,49 @@ func pgReplConnStr() string {
 	return pgConnStr() + "?replication=database"
 }
 
+// newTestS3Client returns an S3 client configured for the MinIO test instance.
+func newTestS3Client(t *testing.T) *s3.Client {
+	t.Helper()
+	ctx := context.Background()
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(s3Region))
+	if err != nil {
+		t.Fatalf("load aws config: %v", err)
+	}
+	return s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(minioEndpoint)
+		o.UsePathStyle = true
+		o.Credentials = credentials.NewStaticCredentialsProvider("minioadmin", "minioadmin", "")
+	})
+}
+
+// newTestDuckDB opens a DuckDB connection with Iceberg and httpfs extensions
+// configured to read from the MinIO test instance. The connection is
+// automatically closed when the test finishes.
+func newTestDuckDB(t *testing.T) *sql.DB {
+	t.Helper()
+	duckDB, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	t.Cleanup(func() { duckDB.Close() })
+
+	for _, stmt := range []string{
+		"INSTALL iceberg", "LOAD iceberg",
+		"INSTALL httpfs", "LOAD httpfs",
+		fmt.Sprintf("SET GLOBAL s3_region = '%s'", s3Region),
+		"SET GLOBAL s3_endpoint = 'localhost:9002'",
+		"SET GLOBAL s3_url_style = 'path'",
+		"SET GLOBAL s3_use_ssl = false",
+		"SET GLOBAL s3_access_key_id = 'minioadmin'",
+		"SET GLOBAL s3_secret_access_key = 'minioadmin'",
+	} {
+		if _, err := duckDB.Exec(stmt); err != nil {
+			t.Fatalf("duckdb setup %q: %v", stmt, err)
+		}
+	}
+	return duckDB
+}
+
 func skipIfNotAvailable(t *testing.T) {
 	t.Helper()
 	// Check Postgres
@@ -95,58 +138,12 @@ func cleanup(t *testing.T) {
 
 func setupTestTable(t *testing.T) {
 	t.Helper()
-	ctx := context.Background()
-	conn, err := pgconn.Connect(ctx, pgConnStr())
-	if err != nil {
-		t.Fatalf("connect to postgres: %v", err)
-	}
-	defer conn.Close(ctx)
-
-	sqls := []string{
-		"DROP TABLE IF EXISTS test_events",
-		`CREATE TABLE test_events (
-			id SERIAL PRIMARY KEY,
-			name TEXT NOT NULL,
-			value DOUBLE PRECISION,
-			created_at TIMESTAMPTZ DEFAULT NOW()
-		)`,
-	}
-	for _, sql := range sqls {
-		result := conn.Exec(ctx, sql)
-		if _, err := result.ReadAll(); err != nil {
-			t.Fatalf("exec %q: %v", sql, err)
-		}
-	}
+	setupNamedTable(t, "test_events")
 }
 
 func insertRows(t *testing.T, count int) {
 	t.Helper()
-	ctx := context.Background()
-	conn, err := pgconn.Connect(ctx, pgConnStr())
-	if err != nil {
-		t.Fatalf("connect to postgres: %v", err)
-	}
-	defer conn.Close(ctx)
-
-	// Insert in batches of 100
-	for i := 0; i < count; i += 100 {
-		batchSize := 100
-		if i+batchSize > count {
-			batchSize = count - i
-		}
-		var sb strings.Builder
-		sb.WriteString("INSERT INTO test_events (name, value) VALUES ")
-		for j := 0; j < batchSize; j++ {
-			if j > 0 {
-				sb.WriteString(", ")
-			}
-			sb.WriteString(fmt.Sprintf("('event_%d', %d.%d)", i+j, i+j, (i+j)%100))
-		}
-		result := conn.Exec(ctx, sb.String())
-		if _, err := result.ReadAll(); err != nil {
-			t.Fatalf("insert batch at %d: %v", i, err)
-		}
-	}
+	insertNamedRows(t, "test_events", count)
 }
 
 // runSync runs the streambed sync pipeline for the given duration.
@@ -245,33 +242,32 @@ func runSync(t *testing.T, ctx context.Context, duration time.Duration, statePat
 func countParquetFilesOnS3(t *testing.T) int {
 	t.Helper()
 	ctx := context.Background()
-
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(s3Region))
-	if err != nil {
-		t.Fatalf("load aws config: %v", err)
-	}
-
-	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(minioEndpoint)
-		o.UsePathStyle = true
-		o.Credentials = credentials.NewStaticCredentialsProvider("minioadmin", "minioadmin", "")
-	})
-
-	output, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String(s3Bucket),
-		Prefix: aws.String(s3Prefix + "/"),
-	})
-	if err != nil {
-		t.Fatalf("list objects: %v", err)
-	}
+	client := newTestS3Client(t)
 
 	parquetCount := 0
-	for _, obj := range output.Contents {
-		key := aws.ToString(obj.Key)
-		t.Logf("S3 object: %s (size: %d)", key, *obj.Size)
-		if strings.HasSuffix(key, ".parquet") {
-			parquetCount++
+	var continuationToken *string
+	for {
+		output, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(s3Bucket),
+			Prefix:            aws.String(s3Prefix + "/"),
+			ContinuationToken: continuationToken,
+		})
+		if err != nil {
+			t.Fatalf("list objects: %v", err)
 		}
+
+		for _, obj := range output.Contents {
+			key := aws.ToString(obj.Key)
+			t.Logf("S3 object: %s (size: %d)", key, *obj.Size)
+			if strings.HasSuffix(key, ".parquet") {
+				parquetCount++
+			}
+		}
+
+		if output.IsTruncated == nil || !*output.IsTruncated {
+			break
+		}
+		continuationToken = output.NextContinuationToken
 	}
 	return parquetCount
 }
@@ -280,17 +276,7 @@ func countParquetFilesOnS3(t *testing.T) int {
 func readVersionHint(t *testing.T) string {
 	t.Helper()
 	ctx := context.Background()
-
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(s3Region))
-	if err != nil {
-		t.Fatalf("load aws config: %v", err)
-	}
-
-	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(minioEndpoint)
-		o.UsePathStyle = true
-		o.Credentials = credentials.NewStaticCredentialsProvider("minioadmin", "minioadmin", "")
-	})
+	client := newTestS3Client(t)
 
 	output, err := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s3Bucket),
@@ -308,17 +294,7 @@ func readVersionHint(t *testing.T) string {
 func readMetadataJSON(t *testing.T, version string) []byte {
 	t.Helper()
 	ctx := context.Background()
-
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(s3Region))
-	if err != nil {
-		t.Fatalf("load aws config: %v", err)
-	}
-
-	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(minioEndpoint)
-		o.UsePathStyle = true
-		o.Credentials = credentials.NewStaticCredentialsProvider("minioadmin", "minioadmin", "")
-	})
+	client := newTestS3Client(t)
 
 	key := fmt.Sprintf("%s/public/test_events/metadata/v%s.metadata.json", s3Prefix, version)
 	output, err := client.GetObject(ctx, &s3.GetObjectInput{
@@ -337,31 +313,30 @@ func readMetadataJSON(t *testing.T, version string) []byte {
 func clearS3Prefix(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
+	client := newTestS3Client(t)
 
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(s3Region))
-	if err != nil {
-		return
-	}
-
-	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(minioEndpoint)
-		o.UsePathStyle = true
-		o.Credentials = credentials.NewStaticCredentialsProvider("minioadmin", "minioadmin", "")
-	})
-
-	output, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String(s3Bucket),
-		Prefix: aws.String(s3Prefix + "/"),
-	})
-	if err != nil {
-		return
-	}
-
-	for _, obj := range output.Contents {
-		client.DeleteObject(ctx, &s3.DeleteObjectInput{
-			Bucket: aws.String(s3Bucket),
-			Key:    obj.Key,
+	var continuationToken *string
+	for {
+		output, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(s3Bucket),
+			Prefix:            aws.String(s3Prefix + "/"),
+			ContinuationToken: continuationToken,
 		})
+		if err != nil {
+			return
+		}
+
+		for _, obj := range output.Contents {
+			client.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(s3Bucket),
+				Key:    obj.Key,
+			})
+		}
+
+		if output.IsTruncated == nil || !*output.IsTruncated {
+			break
+		}
+		continuationToken = output.NextContinuationToken
 	}
 }
 
@@ -370,84 +345,65 @@ func clearS3Prefix(t *testing.T) {
 func countTotalParquetRows(t *testing.T) int64 {
 	t.Helper()
 	ctx := context.Background()
-
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(s3Region))
-	if err != nil {
-		t.Fatalf("load aws config: %v", err)
-	}
-
-	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(minioEndpoint)
-		o.UsePathStyle = true
-		o.Credentials = credentials.NewStaticCredentialsProvider("minioadmin", "minioadmin", "")
-	})
-
-	output, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String(s3Bucket),
-		Prefix: aws.String(s3Prefix + "/"),
-	})
-	if err != nil {
-		t.Fatalf("list objects: %v", err)
-	}
+	client := newTestS3Client(t)
 
 	var totalRows int64
-	for _, obj := range output.Contents {
-		key := aws.ToString(obj.Key)
-		if !strings.HasSuffix(key, ".parquet") {
-			continue
-		}
-
-		// Download the parquet file
-		getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String(s3Bucket),
-			Key:    aws.String(key),
+	var continuationToken *string
+	for {
+		output, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(s3Bucket),
+			Prefix:            aws.String(s3Prefix + "/"),
+			ContinuationToken: continuationToken,
 		})
 		if err != nil {
-			t.Fatalf("get parquet file %s: %v", key, err)
-		}
-		data, err := io.ReadAll(getOut.Body)
-		getOut.Body.Close()
-		if err != nil {
-			t.Fatalf("read parquet file %s: %v", key, err)
+			t.Fatalf("list objects: %v", err)
 		}
 
-		// Open with parquet-go
-		reader := bytes.NewReader(data)
-		f, err := pqgo.OpenFile(reader, int64(len(data)))
-		if err != nil {
-			t.Fatalf("open parquet file %s: %v", key, err)
-		}
-
-		numRows := f.NumRows()
-		t.Logf("parquet file %s: %d rows, %d columns", key, numRows, len(f.Schema().Columns()))
-
-		// Verify schema has expected columns
-		colNames := make([]string, 0)
-		for _, col := range f.Schema().Columns() {
-			colNames = append(colNames, col[0])
-		}
-		t.Logf("  columns: %v", colNames)
-
-		// We expect: id, name, value, created_at
-		if len(colNames) < 4 {
-			t.Errorf("expected at least 4 columns, got %d: %v", len(colNames), colNames)
-		}
-
-		// Read a sample row to verify data is not empty/corrupt
-		pqReader := pqgo.NewReader(reader)
-		rows := make([]map[string]interface{}, 0, 1)
-		for i := 0; i < 1; i++ {
-			row := make(map[string]interface{})
-			if err := pqReader.Read(&row); err != nil {
-				break
+		for _, obj := range output.Contents {
+			key := aws.ToString(obj.Key)
+			if !strings.HasSuffix(key, ".parquet") {
+				continue
 			}
-			rows = append(rows, row)
-		}
-		if len(rows) > 0 {
-			t.Logf("  sample row: %v", rows[0])
+
+			getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String(s3Bucket),
+				Key:    aws.String(key),
+			})
+			if err != nil {
+				t.Fatalf("get parquet file %s: %v", key, err)
+			}
+			data, err := io.ReadAll(getOut.Body)
+			getOut.Body.Close()
+			if err != nil {
+				t.Fatalf("read parquet file %s: %v", key, err)
+			}
+
+			reader := bytes.NewReader(data)
+			f, err := pqgo.OpenFile(reader, int64(len(data)))
+			if err != nil {
+				t.Fatalf("open parquet file %s: %v", key, err)
+			}
+
+			numRows := f.NumRows()
+			t.Logf("parquet file %s: %d rows, %d columns", key, numRows, len(f.Schema().Columns()))
+
+			colNames := make([]string, 0)
+			for _, col := range f.Schema().Columns() {
+				colNames = append(colNames, col[0])
+			}
+			t.Logf("  columns: %v", colNames)
+
+			if len(colNames) < 4 {
+				t.Errorf("expected at least 4 columns, got %d: %v", len(colNames), colNames)
+			}
+
+			totalRows += numRows
 		}
 
-		totalRows += numRows
+		if output.IsTruncated == nil || !*output.IsTruncated {
+			break
+		}
+		continuationToken = output.NextContinuationToken
 	}
 
 	return totalRows
@@ -731,69 +687,11 @@ func execSQL(t *testing.T, sql string) {
 	}
 }
 
-// countLatestSnapshotRows reads the latest snapshot's data files and counts
-// actual parquet rows. This is more accurate than countTotalParquetRows
-// because COW replaces old files — only the latest snapshot matters.
+// countLatestSnapshotRows reads the latest snapshot's data files for
+// test_events and counts actual parquet rows.
 func countLatestSnapshotRows(t *testing.T) int64 {
 	t.Helper()
-	ctx := context.Background()
-
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(s3Region))
-	if err != nil {
-		t.Fatalf("load aws config: %v", err)
-	}
-
-	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(minioEndpoint)
-		o.UsePathStyle = true
-		o.Credentials = credentials.NewStaticCredentialsProvider("minioadmin", "minioadmin", "")
-	})
-
-	s3Client, err := storage.NewS3Client(ctx, s3Bucket, s3Region, minioEndpoint)
-	if err != nil {
-		t.Fatalf("create s3 client: %v", err)
-	}
-
-	catalog := iceberg.NewCatalog(s3Client, s3Bucket, s3Prefix)
-	paths, err := catalog.GetDataFilePaths(ctx, "public", "test_events")
-	if err != nil {
-		t.Fatalf("get data file paths: %v", err)
-	}
-
-	var totalRows int64
-	for _, path := range paths {
-		// GetDataFilePaths returns paths relative to the table prefix,
-		// but they may be S3 URIs. Extract the key.
-		key := path
-		if idx := strings.Index(key, s3Bucket+"/"); idx >= 0 {
-			key = key[idx+len(s3Bucket)+1:]
-		}
-		// If it's a relative path, prepend the prefix.
-		if !strings.HasPrefix(key, s3Prefix) {
-			key = fmt.Sprintf("%s/public/test_events/%s", s3Prefix, key)
-		}
-
-		getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String(s3Bucket),
-			Key:    aws.String(key),
-		})
-		if err != nil {
-			t.Fatalf("get %s: %v", key, err)
-		}
-		data, err := io.ReadAll(getOut.Body)
-		getOut.Body.Close()
-		if err != nil {
-			t.Fatalf("read %s: %v", key, err)
-		}
-
-		f, err := pqgo.OpenFile(bytes.NewReader(data), int64(len(data)))
-		if err != nil {
-			t.Fatalf("open parquet %s: %v", key, err)
-		}
-		totalRows += f.NumRows()
-		t.Logf("  snapshot file %s: %d rows", key, f.NumRows())
-	}
-	return totalRows
+	return countNamedTableSnapshotRows(t, "public", "test_events")
 }
 
 func TestEndToEndResume(t *testing.T) {
@@ -1009,17 +907,7 @@ func insertNamedRows(t *testing.T, table string, count int) {
 func countNamedTableSnapshotRows(t *testing.T, schema, table string) int64 {
 	t.Helper()
 	ctx := context.Background()
-
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(s3Region))
-	if err != nil {
-		t.Fatalf("load aws config: %v", err)
-	}
-
-	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(minioEndpoint)
-		o.UsePathStyle = true
-		o.Credentials = credentials.NewStaticCredentialsProvider("minioadmin", "minioadmin", "")
-	})
+	client := newTestS3Client(t)
 
 	s3Client, err := storage.NewS3Client(ctx, s3Bucket, s3Region, minioEndpoint)
 	if err != nil {
@@ -1209,13 +1097,12 @@ func TestMassiveTransaction(t *testing.T) {
 
 	// Insert all rows in a single transaction.
 	t.Logf("inserting %d rows in single transaction...", totalRows)
-	ctx2 := context.Background()
-	conn, err := pgconn.Connect(ctx2, pgConnStr())
+	conn, err := pgconn.Connect(ctx, pgConnStr())
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 
-	result := conn.Exec(ctx2, "BEGIN")
+	result := conn.Exec(ctx, "BEGIN")
 	if _, err := result.ReadAll(); err != nil {
 		t.Fatalf("BEGIN: %v", err)
 	}
@@ -1232,16 +1119,16 @@ func TestMassiveTransaction(t *testing.T) {
 			}
 			sb.WriteString(fmt.Sprintf("('txn_%d', %d.%d)", i+j, i+j, (i+j)%100))
 		}
-		r := conn.Exec(ctx2, sb.String())
+		r := conn.Exec(ctx, sb.String())
 		if _, err := r.ReadAll(); err != nil {
 			t.Fatalf("insert batch at %d: %v", i, err)
 		}
 	}
-	result = conn.Exec(ctx2, "COMMIT")
+	result = conn.Exec(ctx, "COMMIT")
 	if _, err := result.ReadAll(); err != nil {
 		t.Fatalf("COMMIT: %v", err)
 	}
-	conn.Close(ctx2)
+	conn.Close(ctx)
 
 	t.Log("syncing massive transaction...")
 	runSync(t, ctx, 60*time.Second)
@@ -1352,13 +1239,12 @@ func TestInterleavedMultiTable(t *testing.T) {
 
 	// Interleave inserts across 3 tables in a single transaction.
 	t.Log("inserting interleaved rows across 3 tables in one transaction...")
-	ctx2 := context.Background()
-	conn, err := pgconn.Connect(ctx2, pgConnStr())
+	conn, err := pgconn.Connect(ctx, pgConnStr())
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 
-	r := conn.Exec(ctx2, "BEGIN")
+	r := conn.Exec(ctx, "BEGIN")
 	if _, err := r.ReadAll(); err != nil {
 		t.Fatalf("BEGIN: %v", err)
 	}
@@ -1368,17 +1254,17 @@ func TestInterleavedMultiTable(t *testing.T) {
 			fmt.Sprintf("INSERT INTO table_b (name, value) VALUES ('b_%d', %d)", i, i*2),
 			fmt.Sprintf("INSERT INTO table_c (name, value) VALUES ('c_%d', %d)", i, i*3),
 		} {
-			r := conn.Exec(ctx2, stmt)
+			r := conn.Exec(ctx, stmt)
 			if _, err := r.ReadAll(); err != nil {
 				t.Fatalf("exec %q: %v", stmt, err)
 			}
 		}
 	}
-	r = conn.Exec(ctx2, "COMMIT")
+	r = conn.Exec(ctx, "COMMIT")
 	if _, err := r.ReadAll(); err != nil {
 		t.Fatalf("COMMIT: %v", err)
 	}
-	conn.Close(ctx2)
+	conn.Close(ctx)
 
 	t.Log("syncing interleaved transaction...")
 	runSync(t, ctx, 20*time.Second)
@@ -1726,28 +1612,7 @@ func TestQueryLatencyComparison(t *testing.T) {
 		t.Fatalf("expected %d rows in Iceberg, got %d", totalRows, icebergCount)
 	}
 
-	// Set up DuckDB with Iceberg access.
-	duckDB, err := sql.Open("duckdb", "")
-	if err != nil {
-		t.Fatalf("open duckdb: %v", err)
-	}
-	defer duckDB.Close()
-
-	duckSetup := []string{
-		"INSTALL iceberg", "LOAD iceberg",
-		"INSTALL httpfs", "LOAD httpfs",
-		fmt.Sprintf("SET GLOBAL s3_region = '%s'", s3Region),
-		"SET GLOBAL s3_endpoint = 'localhost:9002'",
-		"SET GLOBAL s3_url_style = 'path'",
-		"SET GLOBAL s3_use_ssl = false",
-		"SET GLOBAL s3_access_key_id = 'minioadmin'",
-		"SET GLOBAL s3_secret_access_key = 'minioadmin'",
-	}
-	for _, stmt := range duckSetup {
-		if _, err := duckDB.Exec(stmt); err != nil {
-			t.Fatalf("duckdb setup %q: %v", stmt, err)
-		}
-	}
+	duckDB := newTestDuckDB(t)
 
 	icebergTable := fmt.Sprintf(
 		"iceberg_scan('s3://%s/%s/public/test_events', allow_moved_paths = true)",
@@ -1869,3 +1734,4 @@ func TestBulkIngestThroughput(t *testing.T) {
 
 	cleanup(t)
 }
+
