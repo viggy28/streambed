@@ -247,42 +247,66 @@ func runSync(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("setup replication slot: %w", err)
 	}
 
-	// Check state store for last flushed LSN (may be more recent than slot)
-	stateLSN, err := stateStore.GetFlushedLSN()
+	// Initialize Iceberg catalog
+	catalog := iceberg.NewCatalog(s3Client, cfg.S3Bucket, cfg.S3Prefix)
+
+	// Read per-table flush LSNs from Iceberg (the sole source of truth).
+	// These are used for dedup on restart and to determine startLSN.
+	tableFlushLSN := make(map[string]pglogrepl.LSN)
+	registeredTables, err := stateStore.GetRegisteredTables()
 	if err != nil {
-		return fmt.Errorf("get flushed LSN from state: %w", err)
+		return fmt.Errorf("get registered tables: %w", err)
 	}
-	var minStoreLsn pglogrepl.LSN
-	for _, lsnStr := range stateLSN {
+	for _, t := range registeredTables {
+		exists, err := catalog.TableExists(ctx, t.Schema, t.Table)
+		if err != nil {
+			return fmt.Errorf("check table %s.%s: %w", t.Schema, t.Table, err)
+		}
+		if !exists {
+			continue
+		}
+		lsnStr, found, err := catalog.GetSnapshotFlushLSN(ctx, t.Schema, t.Table)
+		if err != nil {
+			logger.Warn("cannot read Iceberg LSN, skipping",
+				"table", fmt.Sprintf("%s.%s", t.Schema, t.Table),
+				"error", err,
+			)
+			continue
+		}
+		if !found {
+			continue
+		}
 		lsn, err := pglogrepl.ParseLSN(lsnStr)
 		if err != nil {
-			return fmt.Errorf("error parsing LSN: %s %v", lsnStr, err)
+			return fmt.Errorf("parse Iceberg LSN %q for %s.%s: %w", lsnStr, t.Schema, t.Table, err)
 		}
-		if minStoreLsn > lsn || minStoreLsn == 0 {
-			minStoreLsn = lsn
+		tableFlushLSN[fmt.Sprintf("%s.%s", t.Schema, t.Table)] = lsn
+	}
+
+	var minIcebergLSN pglogrepl.LSN
+	for _, lsn := range tableFlushLSN {
+		if minIcebergLSN == 0 || lsn < minIcebergLSN {
+			minIcebergLSN = lsn
 		}
 	}
 
 	startLSN := slotLSN
-	if minStoreLsn > startLSN {
-		startLSN = minStoreLsn
-		logger.Info("resuming from state store LSN", "lsn", startLSN)
-	} else if minStoreLsn < startLSN && minStoreLsn != 0 {
-		logger.Warn("state store is behind slot position, some data may need re-sync",
-			"min_store_lsn", minStoreLsn,
+	if minIcebergLSN > startLSN {
+		startLSN = minIcebergLSN
+		logger.Info("resuming from Iceberg LSN", "lsn", startLSN)
+	} else if minIcebergLSN < startLSN && minIcebergLSN != 0 {
+		logger.Warn("Iceberg is behind slot position, some data may need re-sync",
+			"min_iceberg_lsn", minIcebergLSN,
 			"slot_lsn", startLSN,
 		)
 	}
-
-	// Initialize Iceberg catalog
-	catalog := iceberg.NewCatalog(s3Client, cfg.S3Bucket, cfg.S3Prefix)
 
 	// Initialize writer
 	writer := iceberg.NewWriter(catalog, s3Client, stateStore, cfg.SlotName,
 		cfg.FlushRows, cfg.FlushInterval, logger)
 
 	// Create consumer
-	consumer := wal.NewConsumer(pgConn, cfg.SlotName, pubName, startLSN, cfg.ExcludeTables, logger, stateStore)
+	consumer := wal.NewConsumer(pgConn, cfg.SlotName, pubName, startLSN, cfg.ExcludeTables, logger, stateStore, tableFlushLSN)
 
 	// Channels
 	events := make(chan wal.RowEvent, 1000)

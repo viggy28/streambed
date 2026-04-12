@@ -27,10 +27,15 @@ type Consumer struct {
 	logger        *slog.Logger
 	excludeTables map[string]bool
 	state         *state.Store
+	// tableFlushLSN holds the per-table last flushed LSN read from
+	// Iceberg at startup. Events with LSN <= this value are skipped
+	// (already flushed). Keyed by "schema.table".
+	tableFlushLSN map[string]pglogrepl.LSN
 }
 
-// NewConsumer creates a new WAL consumer.
-func NewConsumer(conn *pgconn.PgConn, slotName, publication string, startLSN pglogrepl.LSN, excludeTables []string, logger *slog.Logger, state *state.Store) *Consumer {
+// NewConsumer creates a new WAL consumer. tableFlushLSN is the per-table
+// last flushed LSN read from Iceberg at startup, keyed by "schema.table".
+func NewConsumer(conn *pgconn.PgConn, slotName, publication string, startLSN pglogrepl.LSN, excludeTables []string, logger *slog.Logger, state *state.Store, tableFlushLSN map[string]pglogrepl.LSN) *Consumer {
 	exclude := make(map[string]bool)
 	for _, t := range excludeTables {
 		exclude[t] = true
@@ -45,6 +50,7 @@ func NewConsumer(conn *pgconn.PgConn, slotName, publication string, startLSN pgl
 		logger:        logger,
 		excludeTables: exclude,
 		state:         state,
+		tableFlushLSN: tableFlushLSN,
 	}
 }
 
@@ -80,18 +86,7 @@ func (c *Consumer) Start(ctx context.Context, events chan<- RowEvent, ackCh <-ch
 	//       else min(receivedLSN, pendingMinLSN-1).
 	receivedLSN := c.startLSN
 	var pendingMinLSN pglogrepl.LSN
-	tableFlushLSN := make(map[string]pglogrepl.LSN)
-	flushLSN, err := c.state.GetFlushedLSN()
-	if err != nil {
-		return fmt.Errorf("error getting flush LSN for all tables: %w", err)
-	}
-	for table, lsnStr := range flushLSN {
-		lsn, err := pglogrepl.ParseLSN(lsnStr)
-		if err != nil {
-			return fmt.Errorf("parse LSN %q: %w", lsnStr, err)
-		}
-		tableFlushLSN[table] = lsn
-	}
+	tableFlushLSN := c.tableFlushLSN
 
 	// Load backfill filters. Any entry here means a resync has been
 	// performed for that table at snapshot LSN X; main-slot events whose
@@ -237,7 +232,7 @@ func (c *Consumer) Start(ctx context.Context, events chan<- RowEvent, ackCh <-ch
 						)
 					}
 				}
-				if storeLsn := tableFlushLSN[rel.Name]; storeLsn >= xld.WALStart {
+				if storeLsn := tableFlushLSN[key]; storeLsn >= xld.WALStart {
 					return rel, false
 				}
 				return rel, true

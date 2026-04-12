@@ -158,7 +158,7 @@ func Run(ctx context.Context, opts Options) (Stats, error) {
 			Path:     dataFileName,
 			RowCount: int64(len(batch)),
 			FileSize: int64(len(parquetData)),
-		}); err != nil {
+		}, tmp.ConsistentPoint.String()); err != nil {
 			return fmt.Errorf("commit snapshot: %w", err)
 		}
 		stats.Batches++
@@ -211,11 +211,8 @@ func Run(ctx context.Context, opts Options) (Stats, error) {
 
 	// 5. Register the table in state (or refresh column count) and record
 	//    the backfill LSN so the sync consumer filters overlapping events.
-	if err := opts.State.RegisterTable(opts.Schema, opts.Table, len(columns), tmp.ConsistentPoint); err != nil {
+	if err := opts.State.RegisterTable(opts.Schema, opts.Table, len(columns)); err != nil {
 		return stats, fmt.Errorf("register table in state: %w", err)
-	}
-	if err := opts.State.UpdateLastFlush(tmp.ConsistentPoint, opts.Schema, opts.Table); err != nil {
-		return stats, fmt.Errorf("update last_flush: %w", err)
 	}
 	if err := opts.State.SetBackfillLSN(opts.Schema, opts.Table, tmp.ConsistentPoint); err != nil {
 		return stats, fmt.Errorf("set backfill_lsn: %w", err)
