@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"net/http"
 	_ "net/http/pprof"
@@ -22,6 +21,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/viggy28/streambed/config"
 	"github.com/viggy28/streambed/internal/iceberg"
+	"github.com/viggy28/streambed/internal/pipeline"
 	"github.com/viggy28/streambed/internal/resync"
 	"github.com/viggy28/streambed/internal/server"
 	"github.com/viggy28/streambed/internal/state"
@@ -295,9 +295,12 @@ func runSync(cmd *cobra.Command, args []string) error {
 		startLSN = minIcebergLSN
 		logger.Info("resuming from Iceberg LSN", "lsn", startLSN)
 	} else if minIcebergLSN < startLSN && minIcebergLSN != 0 {
-		logger.Warn("Iceberg is behind slot position, some data may need re-sync",
-			"min_iceberg_lsn", minIcebergLSN,
+		// This is normal: cold tables retain an older flush LSN while
+		// the slot advances past them (they had no events in the gap).
+		// Log for visibility but don't block startup.
+		logger.Info("slot ahead of coldest Iceberg LSN (cold tables expected)",
 			"slot_lsn", startLSN,
+			"min_iceberg_lsn", minIcebergLSN,
 		)
 	}
 
@@ -305,43 +308,15 @@ func runSync(cmd *cobra.Command, args []string) error {
 	writer := iceberg.NewWriter(catalog, s3Client, stateStore, cfg.SlotName,
 		cfg.FlushRows, cfg.FlushInterval, logger)
 
-	// Create consumer
-	consumer := wal.NewConsumer(pgConn, cfg.SlotName, pubName, startLSN, cfg.ExcludeTables, logger, stateStore, tableFlushLSN)
+	// Create unified pipeline (single goroutine: reads WAL + writes Iceberg)
+	p := pipeline.New(pgConn, cfg.SlotName, pubName, startLSN, cfg.ExcludeTables,
+		logger, stateStore, tableFlushLSN, writer, cfg.FlushInterval)
 
-	// Channels
-	events := make(chan wal.RowEvent, 1000)
-	ackCh := make(chan pglogrepl.LSN, 10)
+	// Run blocks until ctx is cancelled; does final flush internally.
+	pipelineErr := p.Run(ctx)
 
-	// Start writer in background
-	writerErrCh := make(chan error, 1)
-	go func() {
-		err := writer.Start(ctx, events, ackCh)
-		if err != nil {
-			writerErrCh <- err
-			cancel()
-		} else {
-			writerErrCh <- nil
-		}
-	}()
-
-	// Start consumer (blocks until ctx cancelled)
-	consumerErr := consumer.Start(ctx, events, ackCh)
-
-	// Close events channel so writer can finish
-	close(events)
-
-	// Wait for writer to complete final flush
-	select {
-	case writerErr := <-writerErrCh:
-		if writerErr != nil {
-			logger.Error("writer error", "error", writerErr)
-		}
-	case <-time.After(30 * time.Second):
-		logger.Warn("writer shutdown timed out")
-	}
-
-	if consumerErr != nil && ctx.Err() == nil {
-		return fmt.Errorf("consumer error: %w", consumerErr)
+	if pipelineErr != nil && ctx.Err() == nil {
+		return fmt.Errorf("pipeline error: %w", pipelineErr)
 	}
 
 	logger.Info("streambed stopped")

@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	pqgo "github.com/parquet-go/parquet-go"
 	"github.com/viggy28/streambed/internal/iceberg"
+	"github.com/viggy28/streambed/internal/pipeline"
 	"github.com/viggy28/streambed/internal/state"
 	"github.com/viggy28/streambed/internal/storage"
 	"github.com/viggy28/streambed/internal/wal"
@@ -220,42 +221,21 @@ func runSync(t *testing.T, ctx context.Context, duration time.Duration, statePat
 	writer := iceberg.NewWriter(catalog, s3Client, stateStore, slotName,
 		flushRows, 5*time.Second, logger)
 
-	// Create consumer
-	consumer := wal.NewConsumer(pgConn, slotName, slotName, startLSN, nil, logger, stateStore, tableFlushLSN)
-
-	// Channels
-	events := make(chan wal.RowEvent, 1000)
-	ackCh := make(chan pglogrepl.LSN, 10)
+	// Create unified pipeline
+	p := pipeline.New(pgConn, slotName, slotName, startLSN, nil,
+		logger, stateStore, tableFlushLSN, writer, 5*time.Second)
 
 	// Run with timeout
 	syncCtx, cancel := context.WithTimeout(ctx, duration)
 	defer cancel()
 
-	// Start writer
-	writerErrCh := make(chan error, 1)
-	go func() {
-		writerErrCh <- writer.Start(syncCtx, events, ackCh)
-	}()
+	pipelineErr := p.Run(syncCtx)
 
-	// Start consumer (blocks until ctx cancelled)
-	consumerErr := consumer.Start(syncCtx, events, ackCh)
-	close(events)
-
-	// Wait for writer
-	select {
-	case writerErr := <-writerErrCh:
-		if writerErr != nil {
-			t.Logf("writer error: %v", writerErr)
-		}
-	case <-time.After(10 * time.Second):
-		t.Log("writer shutdown timed out")
-	}
-
-	if consumerErr != nil && syncCtx.Err() != nil {
+	if pipelineErr != nil && syncCtx.Err() != nil {
 		// Expected: context deadline exceeded
-		t.Logf("consumer stopped: %v", consumerErr)
-	} else if consumerErr != nil {
-		t.Fatalf("unexpected consumer error: %v", consumerErr)
+		t.Logf("pipeline stopped: %v", pipelineErr)
+	} else if pipelineErr != nil {
+		t.Fatalf("unexpected pipeline error: %v", pipelineErr)
 	}
 }
 
