@@ -69,53 +69,27 @@ func NewWriter(
 	}
 }
 
-// Start reads from events channel, buffers rows, and flushes on threshold.
-// Sends flushed LSN on ackCh for the consumer's standby status.
-func (w *Writer) Start(ctx context.Context, events <-chan wal.RowEvent, ackCh chan<- pglogrepl.LSN) error {
-	ticker := time.NewTicker(w.flushInterval)
-	defer ticker.Stop()
+// HandleEvent buffers or processes a single RowEvent. If the event causes
+// a per-table buffer to reach the flush threshold, the table is flushed
+// immediately. Returns true if buffering transitioned a table from empty
+// to non-empty (caller may use this to update ack watermarks).
+func (w *Writer) HandleEvent(ctx context.Context, event wal.RowEvent) (transitioned bool, err error) {
+	if event.Op == wal.OpTruncate {
+		if err := w.Truncate(ctx, event); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	transitioned = w.buffer(event)
 
-	for {
-		select {
-		case event, ok := <-events:
-			if !ok {
-				w.logger.Info("flushing all...")
-				return w.flushAll(context.Background(), ackCh)
-			}
-			if event.Op == wal.OpTruncate {
-				if err := w.truncate(ctx, event, ackCh); err != nil {
-					w.logger.Error("truncate error", "table", fmt.Sprintf("%s.%s", event.Schema, event.Table), "error", err)
-					return err
-				}
-				continue
-			}
-			transitioned := w.buffer(event)
-
-			key := fmt.Sprintf("%s.%s", event.Schema, event.Table)
-			b := w.buffers[key]
-			if len(b.Rows)+len(b.Deletes) >= w.flushRows {
-				if err := w.flush(ctx, key, ackCh); err != nil {
-					w.logger.Error("flush error", "table", key, "error", err)
-					return err
-				}
-			} else if transitioned {
-				// A previously-empty buffer just took its first event.
-				// pendingMinLSN may have decreased (or left ∞) — tell the
-				// consumer so its standby ack can be held back.
-				w.sendPendingMin(ackCh)
-			}
-
-		case <-ticker.C:
-			if err := w.flushAll(ctx, ackCh); err != nil {
-				return err
-			}
-
-		case <-ctx.Done():
-			// Final flush on shutdown
-			w.logger.Info("shutdown: flushing remaining buffers")
-			return w.flushAll(context.Background(), ackCh)
+	key := fmt.Sprintf("%s.%s", event.Schema, event.Table)
+	b := w.buffers[key]
+	if len(b.Rows)+len(b.Deletes) >= w.flushRows {
+		if err := w.flush(ctx, key); err != nil {
+			return false, err
 		}
 	}
+	return transitioned, nil
 }
 
 // buffer appends an event to the per-table buffer. Returns true if this
@@ -191,7 +165,7 @@ func (w *Writer) buffer(event wal.RowEvent) bool {
 	return transitioned
 }
 
-func (w *Writer) flush(ctx context.Context, key string, ackCh chan<- pglogrepl.LSN) error {
+func (w *Writer) flush(ctx context.Context, key string) error {
 	buf, exists := w.buffers[key]
 	if !exists || (len(buf.Rows) == 0 && len(buf.Deletes) == 0) {
 		return nil
@@ -321,15 +295,10 @@ func (w *Writer) flush(ctx context.Context, key string, ackCh chan<- pglogrepl.L
 	buf.Deletes = nil
 	buf.FirstLSN = 0
 
-	// The buffer is now empty; pendingMinLSN may have advanced (or gone
-	// to ∞ if this was the last non-empty buffer). Publish the new value
-	// so the consumer can advance its standby ack.
-	w.sendPendingMin(ackCh)
-
 	return nil
 }
 
-// truncate handles a TRUNCATE event for a single table by committing an
+// Truncate handles a TRUNCATE event for a single table by committing an
 // empty-replacement Iceberg snapshot at the TRUNCATE's LSN.
 //
 // Any rows or deletes currently buffered for the table are discarded —
@@ -340,7 +309,7 @@ func (w *Writer) flush(ctx context.Context, key string, ackCh chan<- pglogrepl.L
 // If the table has never been flushed yet (no Iceberg table on disk),
 // the TRUNCATE is a no-op: there is nothing to erase, and the next
 // INSERT will create the table from scratch.
-func (w *Writer) truncate(ctx context.Context, event wal.RowEvent, ackCh chan<- pglogrepl.LSN) error {
+func (w *Writer) Truncate(ctx context.Context, event wal.RowEvent) error {
 	key := fmt.Sprintf("%s.%s", event.Schema, event.Table)
 	start := time.Now()
 
@@ -365,7 +334,6 @@ func (w *Writer) truncate(ctx context.Context, event wal.RowEvent, ackCh chan<- 
 			"table", key,
 			"lsn", event.WALStartLSN.String(),
 		)
-		w.sendPendingMin(ackCh)
 		return nil
 	}
 
@@ -382,14 +350,13 @@ func (w *Writer) truncate(ctx context.Context, event wal.RowEvent, ackCh chan<- 
 		"duration_ms", time.Since(start).Milliseconds(),
 	)
 
-	w.sendPendingMin(ackCh)
 	return nil
 }
 
-// computePendingMinLSN returns the smallest FirstLSN across all buffers
+// ComputePendingMinLSN returns the smallest FirstLSN across all buffers
 // that currently hold unflushed events. Returns 0 (sentinel for ∞) when
 // every buffer is empty.
-func (w *Writer) computePendingMinLSN() pglogrepl.LSN {
+func (w *Writer) ComputePendingMinLSN() pglogrepl.LSN {
 	var min pglogrepl.LSN
 	for _, buf := range w.buffers {
 		if buf.FirstLSN == 0 {
@@ -400,16 +367,6 @@ func (w *Writer) computePendingMinLSN() pglogrepl.LSN {
 		}
 	}
 	return min
-}
-
-// sendPendingMin publishes the current pendingMinLSN watermark to the
-// consumer. Non-blocking: if ackCh is full, the stale value in the
-// channel will be superseded by the next update anyway.
-func (w *Writer) sendPendingMin(ackCh chan<- pglogrepl.LSN) {
-	select {
-	case ackCh <- w.computePendingMinLSN():
-	default:
-	}
 }
 
 // readExistingRows downloads all current data files for a table from S3
@@ -478,11 +435,12 @@ func buildKeyString(vals []pqbuilder.Value) string {
 	return strings.Join(parts, "\x01")
 }
 
-func (w *Writer) flushAll(ctx context.Context, ackCh chan<- pglogrepl.LSN) error {
+// FlushAll flushes every non-empty table buffer to S3 + Iceberg.
+func (w *Writer) FlushAll(ctx context.Context) error {
 	for key := range w.buffers {
 		b := w.buffers[key]
 		if len(b.Rows) > 0 || len(b.Deletes) > 0 {
-			if err := w.flush(ctx, key, ackCh); err != nil {
+			if err := w.flush(ctx, key); err != nil {
 				return err
 			}
 		}
