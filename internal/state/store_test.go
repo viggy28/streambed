@@ -19,120 +19,32 @@ func tempStore(t *testing.T) *Store {
 	return s
 }
 
-func TestGetFlushedLSN_Empty(t *testing.T) {
-	s := tempStore(t)
-	lsn, err := s.GetSafestFlushedLSN()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lsn != 0 {
-		t.Errorf("expected LSN 0 for fresh store, got %s", lsn)
-	}
-}
-
-func TestSetAndGetFlushedLSN(t *testing.T) {
-	s := tempStore(t)
-	want, _ := pglogrepl.ParseLSN("0/1234ABCD")
-
-	if err := s.SetFlushedLSN("test_slot", want); err != nil {
-		t.Fatal(err)
-	}
-
-	// SetFlushedLSN writes to replication_state, GetFlushedLSN reads from synced_tables.
-	// To test the round-trip via synced_tables, register a table with the LSN and flush it.
-	if err := s.RegisterTable("public", "orders", 5, want); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.UpdateLastFlush(want, "public", "orders"); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := s.GetFlushedLSN()
-	if err != nil {
-		t.Fatal(err)
-	}
-	gotLSN, ok := got["orders"]
-	if !ok {
-		t.Fatal("expected orders in flushed LSN map")
-	}
-	if gotLSN != want.String() {
-		t.Errorf("expected LSN %s, got %s", want, gotLSN)
-	}
-}
-
-func TestSetFlushedLSN_Update(t *testing.T) {
-	s := tempStore(t)
-	lsn1, _ := pglogrepl.ParseLSN("0/100")
-	lsn2, _ := pglogrepl.ParseLSN("0/200")
-
-	s.SetFlushedLSN("slot", lsn1)
-	s.SetFlushedLSN("slot", lsn2)
-
-	// Verify via synced_tables round-trip
-	s.RegisterTable("public", "t", 1, lsn2)
-	s.UpdateLastFlush(lsn2, "public", "t")
-
-	got, _ := s.GetFlushedLSN()
-	gotLSN, ok := got["t"]
-	if !ok {
-		t.Fatal("expected table t in flushed LSN map")
-	}
-	if gotLSN != lsn2.String() {
-		t.Errorf("expected updated LSN %s, got %s", lsn2, gotLSN)
-	}
-}
-
 func TestRegisterTable(t *testing.T) {
 	s := tempStore(t)
-	lsn, _ := pglogrepl.ParseLSN("0/100")
-	if err := s.RegisterTable("public", "orders", 5, lsn); err != nil {
+	if err := s.RegisterTable("public", "orders", 5); err != nil {
 		t.Fatal(err)
 	}
 	// Update column count
-	if err := s.RegisterTable("public", "orders", 6, lsn); err != nil {
+	if err := s.RegisterTable("public", "orders", 6); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// TestRegisterTableStoresValidLSN verifies that RegisterTable stores the LSN
-// (not the column count) in last_flush_lsn. This catches the parameter-order
-// bug where columnCount was written as last_flush_lsn.
-func TestRegisterTableStoresValidLSN(t *testing.T) {
+func TestGetRegisteredTables(t *testing.T) {
 	s := tempStore(t)
-	lsn, _ := pglogrepl.ParseLSN("0/ABCD1234")
-
-	if err := s.RegisterTable("public", "events", 7, lsn); err != nil {
+	if err := s.RegisterTable("public", "orders", 5); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RegisterTable("public", "events", 3); err != nil {
 		t.Fatal(err)
 	}
 
-	// GetFlushedLSN reads last_flush_lsn from synced_tables.
-	// If RegisterTable stored "7" (the column count) instead of "0/ABCD1234",
-	// ParseLSN will fail in the caller.
-	got, err := s.GetFlushedLSN()
+	tables, err := s.GetRegisteredTables()
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotLSN, ok := got["events"]
-	if !ok {
-		t.Fatal("expected events in flushed LSN map")
-	}
-
-	// Verify it's a valid LSN by parsing it.
-	parsed, err := pglogrepl.ParseLSN(gotLSN)
-	if err != nil {
-		t.Fatalf("RegisterTable stored invalid LSN %q (column count leaked?): %v", gotLSN, err)
-	}
-	if parsed != lsn {
-		t.Errorf("expected LSN %s, got %s", lsn, parsed)
-	}
-}
-
-func TestUpdateLastFlush(t *testing.T) {
-	s := tempStore(t)
-	lsn, _ := pglogrepl.ParseLSN("0/100")
-	s.RegisterTable("public", "orders", 5, lsn)
-	if err := s.UpdateLastFlush(lsn, "public", "orders"); err != nil {
-		t.Fatal(err)
+	if len(tables) != 2 {
+		t.Fatalf("expected 2 tables, got %d", len(tables))
 	}
 }
 
@@ -152,7 +64,7 @@ func TestBackfillLSN_SetGetClear(t *testing.T) {
 	lsn, _ := pglogrepl.ParseLSN("0/DEADBEEF")
 
 	// Must register table first (backfill_lsn is a column on synced_tables).
-	if err := s.RegisterTable("public", "orders", 5, lsn); err != nil {
+	if err := s.RegisterTable("public", "orders", 5); err != nil {
 		t.Fatal(err)
 	}
 
@@ -189,10 +101,10 @@ func TestBackfillLSN_MultipleTables(t *testing.T) {
 	lsnA, _ := pglogrepl.ParseLSN("0/100")
 	lsnB, _ := pglogrepl.ParseLSN("0/200")
 
-	if err := s.RegisterTable("public", "a", 1, lsnA); err != nil {
+	if err := s.RegisterTable("public", "a", 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RegisterTable("public", "b", 1, lsnB); err != nil {
+	if err := s.RegisterTable("public", "b", 1); err != nil {
 		t.Fatal(err)
 	}
 
