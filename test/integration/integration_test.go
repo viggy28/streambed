@@ -843,3 +843,67 @@ func TestEndToEndResume(t *testing.T) {
 	// Cleanup
 	cleanup(t)
 }
+
+// TestEndToEndCOWDedup verifies that multiple UPDATEs on the same key within
+// a single flush batch are collapsed to the last version, not accumulated.
+// This is the regression test for issue #3.
+func TestEndToEndCOWDedup(t *testing.T) {
+	skipIfNotAvailable(t)
+	ctx := context.Background()
+
+	cleanup(t)
+	clearS3Prefix(t)
+	setupTestTable(t)
+	// Use REPLICA IDENTITY DEFAULT (PK = id) so the dedup key is
+	// just the id column, not all columns. With FULL, every column
+	// is part of the key and each update produces a unique key.
+	// The issue (#3) describes the pgbench case which uses DEFAULT.
+
+	createSlotAndPublication(t)
+
+	sharedStatePath := t.TempDir() + "/state.db"
+
+	// Insert 5 rows.
+	t.Log("inserting 5 rows...")
+	insertRows(t, 5)
+
+	t.Log("syncing inserts...")
+	runSync(t, ctx, 12*time.Second, sharedStatePath)
+
+	rows := countLatestSnapshotRows(t)
+	if rows != 5 {
+		t.Fatalf("expected 5 rows after insert, got %d", rows)
+	}
+
+	// UPDATE the same row 20 times — all in one batch.
+	t.Log("updating same row 20 times...")
+	for i := 0; i < 20; i++ {
+		execSQL(t, fmt.Sprintf("UPDATE test_events SET name = 'version_%d' WHERE id = 1", i))
+	}
+
+	t.Log("syncing repeated updates...")
+	runSync(t, ctx, 12*time.Second, sharedStatePath)
+
+	// After dedup, we should still have exactly 5 rows, not 5+20=25.
+	rows = countLatestSnapshotRows(t)
+	t.Logf("after 20 updates on same key: %d rows in latest snapshot", rows)
+	if rows != 5 {
+		t.Fatalf("expected 5 rows (dedup should collapse repeated updates), got %d", rows)
+	}
+
+	// Also test UPDATE then DELETE in same batch.
+	t.Log("updating then deleting same row...")
+	execSQL(t, "UPDATE test_events SET name = 'about_to_die' WHERE id = 2")
+	execSQL(t, "DELETE FROM test_events WHERE id = 2")
+
+	t.Log("syncing update-then-delete...")
+	runSync(t, ctx, 12*time.Second, sharedStatePath)
+
+	rows = countLatestSnapshotRows(t)
+	t.Logf("after update+delete on same key: %d rows", rows)
+	if rows != 4 {
+		t.Fatalf("expected 4 rows (update+delete should net to delete), got %d", rows)
+	}
+
+	cleanup(t)
+}

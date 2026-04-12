@@ -45,6 +45,10 @@ type tableBuffer struct {
 	// flush. It drives the writer's pendingMinLSN watermark that the
 	// consumer uses to compute a safe standby ack. Zero means empty.
 	FirstLSN pglogrepl.LSN
+	// deletedKeys tracks keys whose last operation in this batch was a
+	// DELETE. INSERT/UPDATE removes the key; DELETE adds it. Used during
+	// flush to avoid re-adding rows that were subsequently deleted.
+	deletedKeys map[string]bool
 }
 
 func NewWriter(
@@ -143,6 +147,12 @@ func (w *Writer) buffer(event wal.RowEvent) bool {
 			row[i] = pqbuilder.Value{Data: v.Value, IsNull: v.IsNull}
 		}
 		buf.Rows = append(buf.Rows, row)
+
+		// This key was just inserted/updated — it is alive.
+		if len(buf.KeyColumns) > 0 && buf.deletedKeys != nil {
+			kv := extractKey(row, buf.KeyColumns)
+			delete(buf.deletedKeys, buildKeyString(kv))
+		}
 	}
 	// Append an equality-delete key (for UPDATE and DELETE).
 	if event.Op == wal.OpUpdate || event.Op == wal.OpDelete {
@@ -151,6 +161,20 @@ func (w *Writer) buffer(event wal.RowEvent) bool {
 			keyRow[i] = pqbuilder.Value{Data: v.Value, IsNull: v.IsNull}
 		}
 		buf.Deletes = append(buf.Deletes, keyRow)
+	}
+
+	// For standalone DELETEs, mark the key as net-deleted so that any
+	// earlier INSERT/UPDATE for the same key in this batch is suppressed
+	// at flush time.
+	if event.Op == wal.OpDelete && len(buf.KeyColumns) > 0 {
+		if buf.deletedKeys == nil {
+			buf.deletedKeys = make(map[string]bool)
+		}
+		keyRow := make([]pqbuilder.Value, len(event.OldKey))
+		for i, v := range event.OldKey {
+			keyRow[i] = pqbuilder.Value{Data: v.Value, IsNull: v.IsNull}
+		}
+		buf.deletedKeys[buildKeyString(keyRow)] = true
 	}
 
 	if event.WALStartLSN > buf.LastLSN {
@@ -218,14 +242,19 @@ func (w *Writer) flush(ctx context.Context, key string) error {
 		// Filter out rows matching any delete key.
 		filtered := filterDeletedRows(existingRows, buf.Deletes, buf.KeyColumns)
 
-		// Combine surviving rows with new inserts.
-		combined := append(filtered, buf.Rows...)
+		// Dedup new rows: collapse multiple updates on the same key to the
+		// last version, and exclude keys that were net-deleted in this batch.
+		dedupedNew := dedupRows(buf.Rows, buf.KeyColumns, buf.deletedKeys)
+
+		// Combine surviving existing rows with deduped new rows.
+		combined := append(filtered, dedupedNew...)
 
 		w.logger.Info("COW merge",
 			"table", key,
 			"existing", len(existingRows),
 			"after_filter", len(filtered),
-			"new_rows", rowCount,
+			"new_rows", len(dedupedNew),
+			"raw_rows", rowCount,
 			"combined", len(combined),
 			"deletes_applied", delCount,
 		)
@@ -293,6 +322,7 @@ func (w *Writer) flush(ctx context.Context, key string) error {
 
 	buf.Rows = nil
 	buf.Deletes = nil
+	buf.deletedKeys = nil
 	buf.FirstLSN = 0
 
 	return nil
@@ -319,6 +349,7 @@ func (w *Writer) Truncate(ctx context.Context, event wal.RowEvent) error {
 	if buf, exists := w.buffers[key]; exists {
 		buf.Rows = nil
 		buf.Deletes = nil
+		buf.deletedKeys = nil
 		buf.FirstLSN = 0
 		if event.WALStartLSN > buf.LastLSN {
 			buf.LastLSN = event.WALStartLSN
@@ -418,6 +449,49 @@ func filterDeletedRows(rows [][]pqbuilder.Value, deletes [][]pqbuilder.Value, ke
 		if !deleteSet[buildKeyString(keyVals)] {
 			result = append(result, row)
 		}
+	}
+	return result
+}
+
+// extractKey pulls key-column values from a full row using the column
+// indices in keyColumns. The returned slice is aligned with keyColumns.
+func extractKey(row []pqbuilder.Value, keyColumns []int) []pqbuilder.Value {
+	kv := make([]pqbuilder.Value, len(keyColumns))
+	for i, idx := range keyColumns {
+		if idx < len(row) {
+			kv[i] = row[idx]
+		}
+	}
+	return kv
+}
+
+// dedupRows collapses multiple rows with the same key down to the last
+// occurrence (latest in WAL order). Rows whose key appears in deletedKeys
+// are excluded entirely — those keys were net-deleted later in the batch.
+// Returns the deduped slice preserving relative order of surviving rows.
+func dedupRows(rows [][]pqbuilder.Value, keyColumns []int, deletedKeys map[string]bool) [][]pqbuilder.Value {
+	if len(keyColumns) == 0 || len(rows) == 0 {
+		return rows
+	}
+
+	// Pass 1: find the last index for each key.
+	lastIdx := make(map[string]int, len(rows))
+	for i, row := range rows {
+		ks := buildKeyString(extractKey(row, keyColumns))
+		lastIdx[ks] = i
+	}
+
+	// Pass 2: collect only the kept rows, preserving order.
+	result := make([][]pqbuilder.Value, 0, len(lastIdx))
+	for i, row := range rows {
+		ks := buildKeyString(extractKey(row, keyColumns))
+		if lastIdx[ks] != i {
+			continue // superseded by a later row with the same key
+		}
+		if deletedKeys[ks] {
+			continue // key was net-deleted later in the batch
+		}
+		result = append(result, row)
 	}
 	return result
 }
