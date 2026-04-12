@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/jackc/pglogrepl"
 	_ "github.com/mattn/go-sqlite3"
@@ -102,70 +101,43 @@ func containsCI(s, sub string) bool {
 	return false
 }
 
-func (s *Store) GetFlushedLSN() (map[string]string, error) {
+
+func (s *Store) RegisterTable(schema, table string, columnCount int) error {
+	_, err := s.db.Exec(`
+		INSERT INTO synced_tables (schema_name, table_name, column_count)
+		VALUES (?, ?, ?)
+		ON CONFLICT(schema_name, table_name) DO UPDATE SET column_count = ?
+	`, schema, table, columnCount, columnCount)
+	return err
+}
+
+
+// RegisteredTable holds a registered table's schema and name.
+type RegisteredTable struct {
+	Schema string
+	Table  string
+}
+
+// GetRegisteredTables returns every table in synced_tables. Used at startup
+// to enumerate tables whose flush LSN should be read from Iceberg.
+func (s *Store) GetRegisteredTables() ([]RegisteredTable, error) {
 	rows, err := s.db.Query(
-		"SELECT table_name, last_flush_lsn FROM synced_tables where last_flush_lsn is NOT NULL",
+		"SELECT schema_name, table_name FROM synced_tables",
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	tableFlushLSN := make(map[string]string)
-	var tableName, last_flush_lsn string
 
+	var out []RegisteredTable
 	for rows.Next() {
-		if err := rows.Scan(&tableName, &last_flush_lsn); err != nil {
+		var t RegisteredTable
+		if err := rows.Scan(&t.Schema, &t.Table); err != nil {
 			return nil, err
 		}
-		tableFlushLSN[tableName] = last_flush_lsn
+		out = append(out, t)
 	}
-
-	return tableFlushLSN, nil
-}
-
-func (s *Store) GetSafestFlushedLSN() (pglogrepl.LSN, error) {
-	var lsnStr string
-	// ideally we should find the minimum of last_flush_lsn_position
-	// since it's a string and need to be decoded to a position, I am using the last_flush timestamp
-	err := s.db.QueryRow(
-		"SELECT last_flush_lsn FROM synced_tables WHERE last_flush IS NOT NULL ORDER BY last_flush ASC LIMIT 1",
-	).Scan(&lsnStr)
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	lsn, err := pglogrepl.ParseLSN(lsnStr)
-	if err != nil {
-		return 0, fmt.Errorf("parse LSN %q: %w", lsnStr, err)
-	}
-	return lsn, nil
-}
-
-func (s *Store) SetFlushedLSN(slotName string, lsn pglogrepl.LSN) error {
-	_, err := s.db.Exec(`
-		INSERT INTO replication_state (slot_name, flushed_lsn, updated_at)
-		VALUES (?, ?, ?)
-		ON CONFLICT(slot_name) DO UPDATE SET flushed_lsn = ?, updated_at = ?
-	`, slotName, lsn.String(), time.Now().UTC(), lsn.String(), time.Now().UTC())
-	return err
-}
-
-func (s *Store) RegisterTable(schema, table string, columnCount int, lsn pglogrepl.LSN) error {
-	_, err := s.db.Exec(`
-		INSERT INTO synced_tables (schema_name, table_name, column_count, last_flush_lsn)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(schema_name, table_name) DO UPDATE SET column_count = ?
-	`, schema, table, columnCount, lsn.String(), columnCount)
-	return err
-}
-
-func (s *Store) UpdateLastFlush(lsn pglogrepl.LSN, schema, table string) error {
-	_, err := s.db.Exec(`
-		UPDATE synced_tables SET last_flush = ?, last_flush_lsn = ? WHERE schema_name = ? AND table_name = ?
-	`, time.Now().UTC(), lsn.String(), schema, table)
-	return err
+	return out, rows.Err()
 }
 
 // DeleteTable removes the synced_tables row for the given schema.table.

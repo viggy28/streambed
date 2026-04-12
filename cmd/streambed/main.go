@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"net/http"
 	_ "net/http/pprof"
@@ -22,6 +21,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/viggy28/streambed/config"
 	"github.com/viggy28/streambed/internal/iceberg"
+	"github.com/viggy28/streambed/internal/pipeline"
 	"github.com/viggy28/streambed/internal/resync"
 	"github.com/viggy28/streambed/internal/server"
 	"github.com/viggy28/streambed/internal/state"
@@ -247,77 +247,76 @@ func runSync(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("setup replication slot: %w", err)
 	}
 
-	// Check state store for last flushed LSN (may be more recent than slot)
-	stateLSN, err := stateStore.GetFlushedLSN()
+	// Initialize Iceberg catalog
+	catalog := iceberg.NewCatalog(s3Client, cfg.S3Bucket, cfg.S3Prefix)
+
+	// Read per-table flush LSNs from Iceberg (the sole source of truth).
+	// These are used for dedup on restart and to determine startLSN.
+	tableFlushLSN := make(map[string]pglogrepl.LSN)
+	registeredTables, err := stateStore.GetRegisteredTables()
 	if err != nil {
-		return fmt.Errorf("get flushed LSN from state: %w", err)
+		return fmt.Errorf("get registered tables: %w", err)
 	}
-	var minStoreLsn pglogrepl.LSN
-	for _, lsnStr := range stateLSN {
+	for _, t := range registeredTables {
+		exists, err := catalog.TableExists(ctx, t.Schema, t.Table)
+		if err != nil {
+			return fmt.Errorf("check table %s.%s: %w", t.Schema, t.Table, err)
+		}
+		if !exists {
+			continue
+		}
+		lsnStr, found, err := catalog.GetSnapshotFlushLSN(ctx, t.Schema, t.Table)
+		if err != nil {
+			logger.Warn("cannot read Iceberg LSN, skipping",
+				"table", fmt.Sprintf("%s.%s", t.Schema, t.Table),
+				"error", err,
+			)
+			continue
+		}
+		if !found {
+			continue
+		}
 		lsn, err := pglogrepl.ParseLSN(lsnStr)
 		if err != nil {
-			return fmt.Errorf("error parsing LSN: %s %v", lsnStr, err)
+			return fmt.Errorf("parse Iceberg LSN %q for %s.%s: %w", lsnStr, t.Schema, t.Table, err)
 		}
-		if minStoreLsn > lsn || minStoreLsn == 0 {
-			minStoreLsn = lsn
+		tableFlushLSN[fmt.Sprintf("%s.%s", t.Schema, t.Table)] = lsn
+	}
+
+	var minIcebergLSN pglogrepl.LSN
+	for _, lsn := range tableFlushLSN {
+		if minIcebergLSN == 0 || lsn < minIcebergLSN {
+			minIcebergLSN = lsn
 		}
 	}
 
 	startLSN := slotLSN
-	if minStoreLsn > startLSN {
-		startLSN = minStoreLsn
-		logger.Info("resuming from state store LSN", "lsn", startLSN)
-	} else if minStoreLsn < startLSN && minStoreLsn != 0 {
-		logger.Warn("state store is behind slot position, some data may need re-sync",
-			"min_store_lsn", minStoreLsn,
+	if minIcebergLSN > startLSN {
+		startLSN = minIcebergLSN
+		logger.Info("resuming from Iceberg LSN", "lsn", startLSN)
+	} else if minIcebergLSN < startLSN && minIcebergLSN != 0 {
+		// This is normal: cold tables retain an older flush LSN while
+		// the slot advances past them (they had no events in the gap).
+		// Log for visibility but don't block startup.
+		logger.Info("slot ahead of coldest Iceberg LSN (cold tables expected)",
 			"slot_lsn", startLSN,
+			"min_iceberg_lsn", minIcebergLSN,
 		)
 	}
-
-	// Initialize Iceberg catalog
-	catalog := iceberg.NewCatalog(s3Client, cfg.S3Bucket, cfg.S3Prefix)
 
 	// Initialize writer
 	writer := iceberg.NewWriter(catalog, s3Client, stateStore, cfg.SlotName,
 		cfg.FlushRows, cfg.FlushInterval, logger)
 
-	// Create consumer
-	consumer := wal.NewConsumer(pgConn, cfg.SlotName, pubName, startLSN, cfg.ExcludeTables, logger, stateStore)
+	// Create unified pipeline (single goroutine: reads WAL + writes Iceberg)
+	p := pipeline.New(pgConn, cfg.SlotName, pubName, startLSN, cfg.ExcludeTables,
+		logger, stateStore, tableFlushLSN, writer, cfg.FlushInterval)
 
-	// Channels
-	events := make(chan wal.RowEvent, 1000)
-	ackCh := make(chan pglogrepl.LSN, 10)
+	// Run blocks until ctx is cancelled; does final flush internally.
+	pipelineErr := p.Run(ctx)
 
-	// Start writer in background
-	writerErrCh := make(chan error, 1)
-	go func() {
-		err := writer.Start(ctx, events, ackCh)
-		if err != nil {
-			writerErrCh <- err
-			cancel()
-		} else {
-			writerErrCh <- nil
-		}
-	}()
-
-	// Start consumer (blocks until ctx cancelled)
-	consumerErr := consumer.Start(ctx, events, ackCh)
-
-	// Close events channel so writer can finish
-	close(events)
-
-	// Wait for writer to complete final flush
-	select {
-	case writerErr := <-writerErrCh:
-		if writerErr != nil {
-			logger.Error("writer error", "error", writerErr)
-		}
-	case <-time.After(30 * time.Second):
-		logger.Warn("writer shutdown timed out")
-	}
-
-	if consumerErr != nil && ctx.Err() == nil {
-		return fmt.Errorf("consumer error: %w", consumerErr)
+	if pipelineErr != nil && ctx.Err() == nil {
+		return fmt.Errorf("pipeline error: %w", pipelineErr)
 	}
 
 	logger.Info("streambed stopped")
