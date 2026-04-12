@@ -1,0 +1,43 @@
+baseURL: https://streambed.dev/
+title: Streambed
+languageCode: en-us
+
+module:
+  imports:
+    - path: github.com/imfing/hextra
+
+markup:
+  goldmark:
+    renderer:
+      unsafe: true
+  highlight:
+    noClasses: false
+
+enableRobotsTXT: true
+enableGitInfo: true
+
+menu:
+  main:
+    - name: Docs
+      pageRef: /docs
+      weight: 1
+    - name: Blog
+      pageRef: /blog
+      weight: 2
+    - name: GitHub
+      url: https://github.com/viggy28/streambed
+      weight: 3
+      params:
+        icon: github
+
+params:
+  description: Postgres-to-Iceberg CDC engine. Offload analytical queries without changing your application.
+  navbar:
+    displayTitle: true
+    displayLogo: false
+  footer:
+    displayCopyright: false
+    displayPoweredBy: false
+  editURL:
+    enable: true
+    base: https://github.com/viggy28/streambed/edit/main/site/content

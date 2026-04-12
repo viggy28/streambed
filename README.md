@@ -1,220 +1,82 @@
-# streambed
+# Streambed
 
-Postgres-to-Iceberg analytics engine. Streams WAL changes from Postgres via logical replication and writes them as Iceberg tables on S3.
+Postgres-to-Iceberg CDC engine. Offload analytical queries from your production database without changing your application.
 
-## Architecture
+streambed streams WAL changes via logical replication, writes Parquet files to S3, and commits Iceberg metadata. Query the result with any Iceberg-compatible engine -- or use the built-in query server, which speaks the Postgres wire protocol so you can connect with `psql`.
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              streambed                                      │
-│                   Postgres-to-Iceberg Analytics Engine                       │
-└─────────────────────────────────────────────────────────────────────────────┘
+## See It In Action
 
-                          ┌──────────────┐
-                          │   main.go    │
-                          │  (runSync)   │
-                          │  Orchestrator│
-                          └──────┬───────┘
-                                 │
-              ┌──────────────────┼──────────────────┐
-              │                  │                   │
-              ▼                  ▼                   ▼
-    ┌─────────────────┐  ┌──────────────┐  ┌────────────────┐
-    │  Signal Handler │  │   Config     │  │  State Store   │
-    │  (goroutine)    │  │  config.go   │  │   store.go     │
-    │                 │  │              │  │   (SQLite)     │
-    │ SIGINT/SIGTERM  │  │ CLI flags +  │  │                │
-    │   → cancel()    │  │ env vars     │  │ synced_tables  │
-    └─────────────────┘  └──────────────┘  └────────────────┘
+Same analytical query on pgbench (1M accounts, 500K history rows). Postgres on the left, Streambed on the right.
 
+<!-- TODO: Record with: vhs demo.tape -->
 
-═══════════════════════ DATA FLOW ═══════════════════════════
+![Demo](docs/demo.gif)
 
-┌──────────┐    WAL Stream     ┌─────────────────────────────────────────┐
-│          │  (replication=     │          Consumer (wal/consumer.go)     │
-│ Postgres │   database)       │          [main goroutine]               │
-│          │──────────────────▶│                                         │
-│  ┌─────┐ │                   │  1. StartReplication(startLSN)          │
-│  │ WAL │ │                   │  2. ReceiveMessage(ctx) loop            │
-│  └─────┘ │                   │  3. Decode: Relation/Insert/Commit      │
-│  ┌─────┐ │  confirmed_       │  4. Dedup via per-table LSN             │
-│  │Slot │ │◀─flush_lsn───────│  5. SendStandbyStatusUpdate             │
-│  └─────┘ │  (via ackCh)     │                                         │
-└──────────┘                   └───────────────┬─────────────────────────┘
-                                               │
-                                               │ events channel
-                                               │ (chan RowEvent, 1000)
-                                               │
-                                               │  RowEvent{Schema, Table,
-                                               │   Columns, Values, WALStartLSN}
-                                               ▼
-                               ┌───────────────────────────────────────┐
-                               │        Writer (iceberg/writer.go)     │
-                               │        [writer goroutine]             │
-                               │                                       │
-                               │  select loop:                         │
-                               │    case event ← events: buffer(event) │
-                               │    case ← ticker: flushAll()          │
-                               │    case ← ctx.Done(): flushAll()      │
-                               │                                       │
-                               │  Per-table buffers:                   │
-                               │  map[string]*tableBuffer              │
-                               │    └─ {Schema, Table, Columns,        │
-                               │        Rows [][]Value, LastLSN}       │
-                               └───────────────┬───────────────────────┘
-                                               │
-                               ┌───────────────┼───────────────────────┐
-                               │         flush(key) pipeline           │
-                               │                                       │
-                               │  ┌──────────────────────────────┐     │
-                               │  │ 1. Parquet Builder           │     │
-                               │  │    (parquet/builder.go)      │     │
-                               │  │    Cols + Rows → .parquet    │     │
-                               │  │    Snappy compression        │     │
-                               │  │    Pg OID → Parquet types    │     │
-                               │  └──────────────┬───────────────┘     │
-                               │                 ▼                     │
-                               │  ┌──────────────────────────────┐     │
-                               │  │ 2. S3 Upload                 │     │
-                               │  │    (storage/s3.go)           │     │
-                               │  │    PutObject(data.parquet)   │     │
-                               │  └──────────────┬───────────────┘     │
-                               │                 ▼                     │
-                               │  ┌──────────────────────────────┐     │
-                               │  │ 3. Iceberg Commit            │     │
-                               │  │    (iceberg/catalog.go)      │     │
-                               │  │    Manifest (Avro) →         │     │
-                               │  │    Manifest List (Avro) →    │     │
-                               │  │    v(N+1).metadata.json →    │     │
-                               │  │    version-hint.text          │     │
-                               │  └──────────────┬───────────────┘     │
-                               │                 ▼                     │
-                               │  ┌──────────────────────────────┐     │
-                               │  │ 4. State Update              │     │
-                               │  │    UpdateLastFlush(LSN)      │     │
-                               │  └──────────────┬───────────────┘     │
-                               │                 ▼                     │
-                               │  ┌──────────────────────────────┐     │
-                               │  │ 5. Ack: leastLSN → ackCh    │     │
-                               │  └──────────────────────────────┘     │
-                               └───────────────────────────────────────┘
-                                               │
-                                               │ ackCh (chan LSN, 10)
-                                               │
-                                               ▼
-                                    back to Consumer for
-                                    SendStandbyStatusUpdate
-
-
-═══════════════════ CONCURRENCY MODEL ══════════════════════
-
-  Goroutine 1 (main)          Goroutine 2 (writer)        Goroutine 3 (signal)
-  ┌──────────────────┐        ┌──────────────────┐        ┌──────────────────┐
-  │ consumer.Start() │──events──▶ writer.Start() │        │ sig := <-sigCh   │
-  │                  │◀──ackCh──│                │        │ cancel()         │
-  │ close(events)    │         │                 │        └──────────────────┘
-  │ <-writerErrCh    │◀─errCh──│                │
-  └──────────────────┘         └──────────────────┘
-         │                            │                          │
-         └────────────────────────────┴──────────────────────────┘
-                     shared: ctx (cancel propagation)
-
-
-═══════════════════ SHUTDOWN FLOW ══════════════════════════
-
-  Ctrl+C → SIGINT → sigCh → cancel() → ctx.Done() closes
-                                           │
-                      ┌────────────────────┼────────────────────┐
-                      ▼                    ▼                    ▼
-               Consumer exits       Writer: flushAll()    Signal goroutine
-               (ReceiveMessage      (context.Background)  already done
-                returns err)
-                      │
-                      ▼
-               close(events)
-                      │
-                      ▼
-               Writer returns → writerErrCh → main exits
-
-
-═══════════════════ S3 / ICEBERG LAYOUT ════════════════════
-
-  s3://<bucket>/<prefix>/
-  └── <schema>/
-      └── <table>/
-          ├── data/
-          │   ├── <uuid>.parquet
-          │   ├── <uuid>.parquet
-          │   └── ...
-          └── metadata/
-              ├── version-hint.text          ← current version N
-              ├── v1.metadata.json           ← initial (no snapshots)
-              ├── v2.metadata.json           ← after first flush
-              ├── v3.metadata.json           ← after second flush
-              ├── <uuid>-m0.avro             ← manifest files
-              └── snap-<id>-<uuid>.avro      ← manifest lists
-
-
-═══════════════════ STATE STORE (SQLite) ═══════════════════
-
-  synced_tables
-  ┌─────────────┬────────────┬──────────────┬────────────┬────────────┬────────────────┐
-  │ schema_name │ table_name │ column_count │ first_seen │ last_flush │ last_flush_lsn │
-  ├─────────────┼────────────┼──────────────┼────────────┼────────────┼────────────────┤
-  │ public      │ users      │ 5            │ 2026-03-27 │ 2026-03-27 │ 1/F84F2938     │
-  └─────────────┴────────────┴──────────────┴────────────┴────────────┴────────────────┘
-
-  Used for: dedup on restart, startLSN selection, per-table LSN tracking
-```
+No ETL. No Spark. Just Postgres + S3.
 
 ## Quick Start
 
 ```bash
-# Install dependencies
-go mod download
+# Start Postgres + MinIO locally
+docker compose up -d
 
 # Build
 go build -o streambed ./cmd/streambed
 
-# Run
-
-streambed sync \
-  --query-addr :5433 \
+# Start syncing + query server on :5433
+./streambed sync \
   --source-url="postgres://postgres:test@localhost:5432/postgres" \
   --s3-bucket="streambed" \
   --s3-endpoint="http://localhost:9000" \
-  --s3-region="us-east-1" \
-  --s3-prefix="test"
+  --s3-prefix="test" \
+  --query-addr=:5433
 
-# then in another session start querying your Postgres data:
-psql -h localhost -U postgres -d postgres -p 5433
+# Query your Postgres tables via Iceberg
+psql -h localhost -p 5433 -U postgres -d postgres
 ```
 
-## Configuration
+Run `streambed sync --help` for all configuration options. All flags support environment variables with `STREAMBED_` prefix (e.g. `STREAMBED_SOURCE_URL`).
 
-| Flag | Env | Description |
-|------|-----|-------------|
-| `--source-url` | `SOURCE_URL` | Postgres connection URL |
-| `--s3-bucket` | `S3_BUCKET` | S3 bucket name |
-| `--s3-prefix` | `S3_PREFIX` | S3 key prefix |
-| `--s3-endpoint` | `S3_ENDPOINT` | Custom S3 endpoint (MinIO) |
-| `--s3-region` | `S3_REGION` | AWS region |
-| `--state-path` | `STATE_PATH` | SQLite state file path |
-| `--slot-name` | `SLOT_NAME` | Replication slot name |
-| `--flush-rows` | `FLUSH_ROWS` | Row buffer flush threshold |
-| `--flush-interval` | `FLUSH_INTERVAL` | Time-based flush interval |
-| `--include-tables` | `INCLUDE_TABLES` | Tables to include |
-| `--exclude-tables` | `EXCLUDE_TABLES` | Tables to exclude |
-| `--log-level` | `LOG_LEVEL` | Log level (DEBUG, INFO, WARN, ERROR) |
+## Architecture
 
-## Profiling
+![Architecture](/docs/architecture.svg)
 
-streambed exposes pprof on `localhost:6060`:
+## How It Works
+
+```
+Postgres WAL ──▶ Decode ──▶ Buffer ──▶ Parquet ──▶ S3 ──▶ Iceberg Commit
+                                                              │
+                                                    DuckDB ◀──┘ (query server)
+```
+
+Streambed connects to Postgres as a logical replication subscriber. It decodes WAL messages (inserts, updates, deletes), buffers rows per table, and periodically flushes them as Parquet files to S3 with Iceberg metadata commits. Updates and deletes use copy-on-write merging against existing Parquet data.
+
+A query server exposes Iceberg tables over the Postgres wire protocol using embedded DuckDB, so you can query with psql or any Postgres client.
+
+
+## Commands
+
+| Command | What it does |
+|---------|-------------|
+| `streambed sync` | Main daemon. Streams WAL, writes Iceberg, optionally serves queries. |
+| `streambed resync --table=public.users` | One-shot backfill via `COPY` under a consistent snapshot. |
+| `streambed query` | Standalone query server (no sync). Points at existing Iceberg tables. |
+| `streambed cleanup --table=public.users` | Deletes S3 objects and state for a table. Useful before `resync`. |
+
+
+## Development
+
+Requires Go 1.22+ and CGO (for go-duckdb and go-sqlite3).
 
 ```bash
-# CPU profile
-go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
+# Build
+go build -o streambed ./cmd/streambed
 
-# Goroutine dump
-go tool pprof http://localhost:6060/debug/pprof/goroutine
+# Unit tests
+go test ./internal/... ./config/...
+
+# Integration tests (requires Docker)
+./scripts/test-integration.sh
 ```
+
+Integration tests use the `integration` build tag and run against Postgres (port 5434) and MinIO (port 9002) from `test/integration/docker-compose.yml`.
