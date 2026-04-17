@@ -5,13 +5,13 @@ toc: false
 
 <div class="hx-mt-6 hx-mb-6">
 {{< hextra/hero-headline >}}
-  Postgres-to-Iceberg CDC Engine
+  Your Postgres,&nbsp;<br class="sm:hx-block hx-hidden" />20× faster for analytics.
 {{< /hextra/hero-headline >}}
 </div>
 
 <div class="hx-mb-12">
 {{< hextra/hero-subtitle >}}
-  Offload analytical queries from your production database&nbsp;<br class="sm:hx-block hx-hidden" />without changing your application.
+  Streambed streams your WAL into Iceberg tables on S3.&nbsp;<br class="sm:hx-block hx-hidden" />Query them with `psql` at DuckDB speed — your data stays in open formats, in your bucket.
 {{< /hextra/hero-subtitle >}}
 </div>
 
@@ -22,22 +22,22 @@ toc: false
 {{< /hextra/hero-badge >}}
 </div>
 
-<div class="hx-mt-6"></div>
+<div class="hx-mt-10"></div>
 
-Stream WAL changes via logical replication, write Parquet files to S3, and commit Iceberg metadata. Query the result with any Iceberg-compatible engine -- or use the built-in query server, which speaks the Postgres wire protocol so you can connect with `psql`.
+![Same analytical query. Postgres on the left, Streambed on the right.](demo.gif)
 
-<div class="hx-mt-8"></div>
+<div class="hx-mt-10"></div>
 
-## Same Query. Same Results. 20x Faster.
+## Built on open standards. No vendors.
 
-pgbench schema -- 1M accounts, 500K history rows. Same correlated subquery, same `psql`:
+Every piece of streambed is something you can inspect, swap, or run yourself:
 
-```
-Postgres (port 5432):  ~45s
-Streambed (port 5433): ~2s
-```
+- **Apache Iceberg** — your tables live in an open table format, queryable by any Iceberg-compatible engine.
+- **DuckDB** — the columnar engine doing the heavy lifting, embedded directly in the query server.
+- **Parquet on your S3** — your data sits in your bucket, in an open columnar format. No warehouse to provision.
+- **Postgres wire protocol** — connect with `psql`, `pgcli`, or any tool that already speaks Postgres.
 
-No ETL. No Spark. Just Postgres + S3.
+No Snowflake. No Databricks. No BigQuery. The point of streambed is to show how far you can push open source and object storage before you need any of them.
 
 <div class="hx-mt-8"></div>
 
