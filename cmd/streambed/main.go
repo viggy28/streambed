@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"net/http"
 	_ "net/http/pprof"
@@ -313,14 +314,101 @@ func runSync(cmd *cobra.Command, args []string) error {
 		logger, stateStore, tableFlushLSN, writer, cfg.FlushInterval)
 
 	// Run blocks until ctx is cancelled; does final flush internally.
-	pipelineErr := p.Run(ctx)
+	// On non-context errors (e.g. Postgres disconnect, transient S3
+	// failure), reconnect and resume from the last durable position.
+	const maxReconnects = 10
+	reconnectBackoff := 1 * time.Second
+	maxReconnectBackoff := 60 * time.Second
 
-	if pipelineErr != nil && ctx.Err() == nil {
-		return fmt.Errorf("pipeline error: %w", pipelineErr)
+	for attempt := 0; ; attempt++ {
+		pipelineErr := p.Run(ctx)
+
+		// Clean shutdown.
+		if ctx.Err() != nil {
+			logger.Info("streambed stopped")
+			return nil
+		}
+
+		// Permanent failure after exhausting retries.
+		if attempt >= maxReconnects {
+			return fmt.Errorf("pipeline error after %d reconnects: %w", attempt, pipelineErr)
+		}
+
+		logger.Warn("pipeline error, will reconnect",
+			"error", pipelineErr,
+			"attempt", attempt+1,
+			"backoff", reconnectBackoff,
+		)
+
+		// Close old connection (best-effort).
+		pgConn.Close(context.Background())
+
+		// Wait before reconnecting.
+		select {
+		case <-time.After(reconnectBackoff):
+		case <-ctx.Done():
+			logger.Info("streambed stopped during reconnect backoff")
+			return nil
+		}
+		reconnectBackoff = min(reconnectBackoff*2, maxReconnectBackoff)
+
+		// Reconnect to Postgres.
+		pgConn, err = pgconn.Connect(ctx, connStr)
+		if err != nil {
+			logger.Error("reconnect failed", "error", err)
+			continue
+		}
+
+		// Re-read per-table flush LSNs from Iceberg (may have advanced
+		// from the last successful flush before the crash).
+		registeredTables, err = stateStore.GetRegisteredTables()
+		if err != nil {
+			return fmt.Errorf("get registered tables on reconnect: %w", err)
+		}
+		tableFlushLSN = make(map[string]pglogrepl.LSN)
+		for _, t := range registeredTables {
+			exists, err := catalog.TableExists(ctx, t.Schema, t.Table)
+			if err != nil || !exists {
+				continue
+			}
+			lsnStr, found, err := catalog.GetSnapshotFlushLSN(ctx, t.Schema, t.Table)
+			if err != nil || !found {
+				continue
+			}
+			lsn, err := pglogrepl.ParseLSN(lsnStr)
+			if err != nil {
+				continue
+			}
+			tableFlushLSN[fmt.Sprintf("%s.%s", t.Schema, t.Table)] = lsn
+		}
+
+		// Recompute startLSN.
+		slotLSN, err = wal.CreateOrReuseSlot(ctx, pgConn, cfg.SlotName, logger)
+		if err != nil {
+			logger.Error("reconnect: slot setup failed", "error", err)
+			continue
+		}
+		startLSN = slotLSN
+		for _, lsn := range tableFlushLSN {
+			if lsn > startLSN {
+				startLSN = lsn
+			}
+		}
+
+		// Recreate writer and pipeline with fresh state.
+		writer = iceberg.NewWriter(catalog, s3Client, stateStore, cfg.SlotName,
+			cfg.FlushRows, cfg.FlushInterval, logger)
+		p = pipeline.New(pgConn, cfg.SlotName, pubName, startLSN, cfg.ExcludeTables,
+			logger, stateStore, tableFlushLSN, writer, cfg.FlushInterval)
+
+		logger.Info("reconnected, resuming pipeline",
+			"start_lsn", startLSN,
+			"attempt", attempt+1,
+		)
+
+		// Reset backoff on successful reconnect.
+		reconnectBackoff = 1 * time.Second
 	}
-
-	logger.Info("streambed stopped")
-	return nil
 }
 
 // runQuery starts the query server in standalone mode (no Postgres sync).

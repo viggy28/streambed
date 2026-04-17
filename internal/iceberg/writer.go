@@ -1,10 +1,10 @@
 package iceberg
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -144,7 +144,7 @@ func (w *Writer) buffer(event wal.RowEvent) bool {
 	if event.Op == wal.OpInsert || event.Op == wal.OpUpdate {
 		row := make([]pqbuilder.Value, len(event.Values))
 		for i, v := range event.Values {
-			row[i] = pqbuilder.Value{Data: v.Value, IsNull: v.IsNull}
+			row[i] = pqbuilder.Value{Data: v.Value, IsNull: v.IsNull || v.IsUnchangedTOAST}
 		}
 		buf.Rows = append(buf.Rows, row)
 
@@ -496,17 +496,26 @@ func dedupRows(rows [][]pqbuilder.Value, keyColumns []int, deletedKeys map[strin
 	return result
 }
 
-// buildKeyString serializes key-column values into a comparable string.
+// buildKeyString serializes key-column values into a comparable string
+// using length-prefixed encoding to avoid collisions. Each value is
+// encoded as: 1 byte type flag (0=null, 1=data) + 4 byte big-endian
+// length + raw bytes. This is unambiguous regardless of value content.
 func buildKeyString(vals []pqbuilder.Value) string {
-	parts := make([]string, len(vals))
-	for i, v := range vals {
+	var buf bytes.Buffer
+	for _, v := range vals {
 		if v.IsNull {
-			parts[i] = "\x00"
+			buf.WriteByte(0) // null flag
 		} else {
-			parts[i] = string(v.Data)
+			buf.WriteByte(1) // data flag
+			l := len(v.Data)
+			buf.WriteByte(byte(l >> 24))
+			buf.WriteByte(byte(l >> 16))
+			buf.WriteByte(byte(l >> 8))
+			buf.WriteByte(byte(l))
+			buf.Write(v.Data)
 		}
 	}
-	return strings.Join(parts, "\x01")
+	return buf.String()
 }
 
 // FlushAll flushes every non-empty table buffer to S3 + Iceberg.

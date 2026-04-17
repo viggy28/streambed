@@ -166,6 +166,51 @@ func TestExtractKey(t *testing.T) {
 	}
 }
 
+func TestBuildKeyString_NoCollision(t *testing.T) {
+	// Keys with separator bytes in values must not collide.
+	// Old implementation using \x01 separator would cause
+	// ("a\x01b", "c") == ("a", "b\x01c").
+	key1 := buildKeyString([]pqbuilder.Value{
+		val("a\x01b"),
+		val("c"),
+	})
+	key2 := buildKeyString([]pqbuilder.Value{
+		val("a"),
+		val("b\x01c"),
+	})
+	if key1 == key2 {
+		t.Fatal("keys with separator bytes in values must not collide")
+	}
+}
+
+func TestBuildKeyString_NullVsEmpty(t *testing.T) {
+	// NULL and empty string must produce different keys.
+	key1 := buildKeyString([]pqbuilder.Value{
+		nullVal(),
+		val("x"),
+	})
+	key2 := buildKeyString([]pqbuilder.Value{
+		val(""),
+		val("x"),
+	})
+	if key1 == key2 {
+		t.Fatal("NULL and empty string must produce different keys")
+	}
+}
+
+func TestBuildKeyString_NullSentinelInValue(t *testing.T) {
+	// Value containing \x00 must not collide with NULL.
+	key1 := buildKeyString([]pqbuilder.Value{
+		val("\x00"),
+	})
+	key2 := buildKeyString([]pqbuilder.Value{
+		nullVal(),
+	})
+	if key1 == key2 {
+		t.Fatal("value containing \\x00 must not collide with NULL")
+	}
+}
+
 func TestFilterDeletedRows(t *testing.T) {
 	// Verify existing function still works correctly.
 	existing := [][]pqbuilder.Value{

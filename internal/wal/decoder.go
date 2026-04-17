@@ -110,8 +110,8 @@ func (d *Decoder) decodeTuple(rel *RelationMessage, tup *pglogrepl.TupleData) []
 		case 't':
 			cv.Value = col.Data
 		case 'u':
-			cv.IsNull = true
-			d.logger.Debug("unchanged TOAST value treated as null",
+			cv.IsUnchangedTOAST = true
+			d.logger.Debug("unchanged TOAST marker",
 				"table", rel.Name,
 				"column", cv.Name,
 			)
@@ -155,17 +155,50 @@ func (d *Decoder) decodeUpdate(m *pglogrepl.UpdateMessage) (*UpdateMessage, erro
 		// No replica identity key → caller will skip this event.
 		return &UpdateMessage{RelationID: m.RelationID, NewRow: newRow}, nil
 	}
+
+	// Check for unchanged TOAST columns in the new row and attempt to
+	// fill them from the old tuple (available with REPLICA IDENTITY FULL).
+	hasToast := false
+	for _, cv := range newRow {
+		if cv.IsUnchangedTOAST {
+			hasToast = true
+			break
+		}
+	}
+
 	if m.OldTuple != nil {
 		oldFull := d.decodeTuple(rel, m.OldTuple)
 		oldKey = make([]ColumnValue, len(rel.KeyColumnIndexes))
 		for i, idx := range rel.KeyColumnIndexes {
 			oldKey[i] = oldFull[idx]
 		}
+		// Merge unchanged TOAST values from old tuple (REPLICA IDENTITY FULL).
+		if hasToast {
+			for i, cv := range newRow {
+				if cv.IsUnchangedTOAST && i < len(oldFull) {
+					newRow[i] = oldFull[i]
+				}
+			}
+		}
 	} else {
 		// Key unchanged: derive from NEW tuple.
 		oldKey = make([]ColumnValue, len(rel.KeyColumnIndexes))
 		for i, idx := range rel.KeyColumnIndexes {
 			oldKey[i] = newRow[idx]
+		}
+		if hasToast {
+			d.logger.Warn("UPDATE has unchanged TOAST columns but no old tuple; "+
+				"TOAST values will be NULL. Set REPLICA IDENTITY FULL on this table "+
+				"to preserve TOAST column values through updates",
+				"table", rel.Name,
+			)
+			// Fall back to NULL for unchanged TOAST columns.
+			for i, cv := range newRow {
+				if cv.IsUnchangedTOAST {
+					newRow[i].IsNull = true
+					newRow[i].IsUnchangedTOAST = false
+				}
+			}
 		}
 	}
 	return &UpdateMessage{

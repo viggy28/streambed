@@ -331,9 +331,10 @@ func (c *Catalog) CommitChangeset(
 		for _, snap := range metadata.Snapshots {
 			if snap.SnapshotID == metadata.CurrentSnapshotID {
 				prevFiles, err := c.readManifestList(ctx, snap.ManifestList)
-				if err == nil {
-					manifestFiles = append(manifestFiles, prevFiles...)
+				if err != nil {
+					return fmt.Errorf("carry forward manifest list from snapshot %d: %w", snap.SnapshotID, err)
 				}
+				manifestFiles = append(manifestFiles, prevFiles...)
 				break
 			}
 		}

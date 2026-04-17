@@ -48,49 +48,65 @@ func NewS3Client(ctx context.Context, bucket, region, endpoint string) (*S3Clien
 }
 
 func (s *S3Client) PutObject(ctx context.Context, key string, data []byte, contentType string) error {
-	input := &s3.PutObjectInput{
-		Bucket:      aws.String(s.bucket),
-		Key:         aws.String(key),
-		Body:        bytes.NewReader(data),
-		ContentType: aws.String(contentType),
-	}
-	_, err := s.client.PutObject(ctx, input)
-	if err != nil {
-		return fmt.Errorf("put s3://%s/%s: %w", s.bucket, key, err)
-	}
-	return nil
+	return retryWithBackoff(ctx, func() error {
+		input := &s3.PutObjectInput{
+			Bucket:      aws.String(s.bucket),
+			Key:         aws.String(key),
+			Body:        bytes.NewReader(data),
+			ContentType: aws.String(contentType),
+		}
+		_, err := s.client.PutObject(ctx, input)
+		if err != nil {
+			return fmt.Errorf("put s3://%s/%s: %w", s.bucket, key, err)
+		}
+		return nil
+	})
 }
 
 func (s *S3Client) GetObject(ctx context.Context, key string) ([]byte, error) {
-	output, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+	var result []byte
+	err := retryWithBackoff(ctx, func() error {
+		output, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(s.bucket),
+			Key:    aws.String(key),
+		})
+		if err != nil {
+			return fmt.Errorf("get s3://%s/%s: %w", s.bucket, key, err)
+		}
+		defer output.Body.Close()
+		result, err = io.ReadAll(output.Body)
+		if err != nil {
+			return fmt.Errorf("read body s3://%s/%s: %w", s.bucket, key, err)
+		}
+		return nil
 	})
-	if err != nil {
-		return nil, fmt.Errorf("get s3://%s/%s: %w", s.bucket, key, err)
-	}
-	defer output.Body.Close()
-	return io.ReadAll(output.Body)
+	return result, err
 }
 
 func (s *S3Client) HeadObject(ctx context.Context, key string) (bool, error) {
-	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+	var exists bool
+	err := retryWithBackoff(ctx, func() error {
+		_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(s.bucket),
+			Key:    aws.String(key),
+		})
+		if err != nil {
+			var notFound *types.NotFound
+			if errors.As(err, &notFound) {
+				exists = false
+				return nil
+			}
+			var noSuchKey *types.NoSuchKey
+			if errors.As(err, &noSuchKey) {
+				exists = false
+				return nil
+			}
+			return fmt.Errorf("head s3://%s/%s: %w", s.bucket, key, err)
+		}
+		exists = true
+		return nil
 	})
-	if err != nil {
-		var notFound *types.NotFound
-		if errors.As(err, &notFound) {
-			return false, nil
-		}
-		// Also check for NoSuchKey
-		var noSuchKey *types.NoSuchKey
-		if errors.As(err, &noSuchKey) {
-			return false, nil
-		}
-		return false, fmt.Errorf("head s3://%s/%s: %w", s.bucket, key, err)
-	}
-	return true, nil
+	return exists, err
 }
 
 // ListPrefix returns all object keys under the given prefix.

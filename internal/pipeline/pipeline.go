@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pglogrepl"
@@ -102,6 +103,24 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load backfill filters: %w", err)
 	}
+	// Clear stale backfill filters where the slot has already advanced
+	// past the filter LSN (e.g. pipeline crashed before clearing).
+	for key, filterLSN := range backfillFilters {
+		if filterLSN < p.startLSN {
+			parts := strings.SplitN(key, ".", 2)
+			if len(parts) == 2 {
+				if err := p.state.ClearBackfillLSN(parts[0], parts[1]); err != nil {
+					p.logger.Warn("clear stale backfill_lsn", "table", key, "error", err)
+				}
+			}
+			p.logger.Info("cleared stale backfill filter",
+				"table", key,
+				"filter_lsn", filterLSN,
+				"start_lsn", p.startLSN,
+			)
+			delete(backfillFilters, key)
+		}
+	}
 	if len(backfillFilters) > 0 {
 		p.logger.Info("backfill overlap filters active",
 			"tables", len(backfillFilters),
@@ -195,8 +214,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 
 			decoded, err := p.decoder.Decode(msg)
 			if err != nil {
-				p.logger.Error("decode error", "error", err)
-				continue
+				return fmt.Errorf("decode WAL message at LSN %s: %w", xld.WALStart, err)
 			}
 
 			// shouldProcess applies the exclude list, backfill-overlap

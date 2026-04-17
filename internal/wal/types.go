@@ -29,10 +29,11 @@ type RelationMessage struct {
 
 // ColumnValue holds a single decoded column value from a WAL tuple.
 type ColumnValue struct {
-	Name   string
-	OID    uint32
-	Value  []byte
-	IsNull bool
+	Name             string
+	OID              uint32
+	Value            []byte
+	IsNull           bool
+	IsUnchangedTOAST bool // true when pgoutput sends 'u' (unchanged TOAST marker)
 }
 
 // InsertMessage represents a single INSERT decoded from the WAL.
