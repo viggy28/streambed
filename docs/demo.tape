@@ -94,25 +94,25 @@ Ctrl+b
 Type "o"
 Sleep 200ms
 Enter
-Sleep 3s
+Sleep 2s
 
 # --- Pre-stage the analytical query (detach, send-keys, re-attach) ---
 Hide
 Ctrl+b
 Type "d"
-Sleep 500ms
+Sleep 300ms
 Type `tmux send-keys -t demo:0.0 'time psql -h localhost -p 5432 -U postgres -c "SELECT a.aid, a.bid, a.abalance, (SELECT count(*) FROM pgbench_history h WHERE h.aid = a.aid) AS my_txns, (SELECT avg(cnt) FROM (SELECT count(*) AS cnt FROM pgbench_history h2 JOIN pgbench_accounts a2 ON a2.aid = h2.aid WHERE a2.bid = a.bid GROUP BY h2.aid) sub) AS branch_avg_txns FROM pgbench_accounts a WHERE a.abalance > 0 ORDER BY my_txns DESC, a.aid ASC LIMIT 20" && echo -e "\e[1;32m✓ Done\e[0m"'`
 Enter
-Sleep 300ms
+Sleep 200ms
 Type `tmux send-keys -t demo:0.1 'time psql -h localhost -p 5433 -U postgres -c "SELECT a.aid, a.bid, a.abalance, (SELECT count(*) FROM pgbench_history h WHERE h.aid = a.aid) AS my_txns, (SELECT avg(cnt) FROM (SELECT count(*) AS cnt FROM pgbench_history h2 JOIN pgbench_accounts a2 ON a2.aid = h2.aid WHERE a2.bid = a.bid GROUP BY h2.aid) sub) AS branch_avg_txns FROM pgbench_accounts a WHERE a.abalance > 0 ORDER BY my_txns DESC, a.aid ASC LIMIT 20" && echo -e "\e[1;32m✓ Done\e[0m"'`
 Enter
-Sleep 300ms
+Sleep 200ms
 Type "tmux select-pane -t demo:0.0"
 Enter
 Sleep 200ms
 Type "tmux attach -t demo"
 Enter
-Sleep 500ms
+Sleep 300ms
 Show
 
 # --- Fire the analytical query: press Enter in each pane ---
