@@ -44,7 +44,7 @@ jobs:
 
       - name: Fetch Hugo modules
         working-directory: site
-        run: hugo mod download
+        run: go mod download
 
       - name: Build site
         working-directory: site
