@@ -1,5 +1,9 @@
 # Streambed
 
+[![CI](https://github.com/viggy28/streambed/actions/workflows/ci.yml/badge.svg)](https://github.com/viggy28/streambed/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/viggy28/streambed.svg)](https://pkg.go.dev/github.com/viggy28/streambed)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 Postgres-to-Iceberg CDC engine. Offload analytical queries from your production database without changing your application.
 
 streambed streams WAL changes via logical replication, writes Parquet files to S3, and commits Iceberg metadata. Query the result with any Iceberg-compatible engine -- or use the built-in query server, which speaks the Postgres wire protocol so you can connect with `psql`.

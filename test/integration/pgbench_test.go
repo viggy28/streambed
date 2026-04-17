@@ -18,6 +18,9 @@ import (
 // NOTE: This test is slow (~2min) and is intended for manual runs, not CI.
 // For the full query suite, use: scripts/bench-pgbench.sql
 func TestPgbenchQueryLatency(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping pgbench benchmark in short mode")
+	}
 	skipIfNotAvailable(t)
 	ctx := context.Background()
 
