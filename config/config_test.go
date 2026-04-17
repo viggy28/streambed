@@ -20,8 +20,8 @@ func TestDefaults(t *testing.T) {
 	if cfg.FlushRows != 10000 {
 		t.Errorf("expected FlushRows 10000, got %d", cfg.FlushRows)
 	}
-	if cfg.FlushInterval != 30*time.Second {
-		t.Errorf("expected FlushInterval 30s, got %v", cfg.FlushInterval)
+	if cfg.FlushInterval != 2*time.Second {
+		t.Errorf("expected FlushInterval 2s, got %v", cfg.FlushInterval)
 	}
 	if cfg.LogLevel != "INFO" {
 		t.Errorf("expected LogLevel 'INFO', got %q", cfg.LogLevel)

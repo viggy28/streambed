@@ -3,9 +3,22 @@ package iceberg
 import (
 	"bytes"
 	"fmt"
+	"io"
 
 	ice "github.com/apache/iceberg-go"
 )
+
+// countingWriter wraps a writer and counts bytes written.
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
+}
 
 // pgOIDToIcebergPrimitive maps a Postgres OID to an iceberg-go PrimitiveType.
 func pgOIDToIcebergPrimitive(oid uint32) ice.Type {
@@ -138,9 +151,20 @@ func writeEqDeleteManifestAvro(
 		Build()
 
 	buf := new(bytes.Buffer)
-	mf, err := ice.WriteManifest(filename, buf, 2, *ice.UnpartitionedSpec, schema, snapshotID, []ice.ManifestEntry{entry})
+	cnt := &countingWriter{w: buf}
+	w, err := ice.NewManifestWriter(2, cnt, *ice.UnpartitionedSpec, schema, snapshotID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("write eq-delete manifest: %w", err)
+		return nil, nil, fmt.Errorf("create manifest writer: %w", err)
+	}
+	if err := w.Add(entry); err != nil {
+		return nil, nil, fmt.Errorf("add eq-delete entry: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return nil, nil, fmt.Errorf("close manifest writer: %w", err)
+	}
+	mf, err := w.ToManifestFile(filename, cnt.n, ice.WithManifestFileContent(ice.ManifestContentDeletes))
+	if err != nil {
+		return nil, nil, fmt.Errorf("build eq-delete manifest file: %w", err)
 	}
 	return buf.Bytes(), mf, nil
 }
