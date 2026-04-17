@@ -35,7 +35,7 @@ type Server struct {
 
 // NewServer creates a query server. Initializes an embedded DuckDB instance
 // configured with S3 credentials and loads the Iceberg + httpfs extensions.
-func NewServer(cfg ServerConfig, s3Client *storage.S3Client, logger *slog.Logger) (*Server, error) {
+func NewServer(cfg ServerConfig, s3Client storage.ObjectStorage, logger *slog.Logger) (*Server, error) {
 	db, err := sql.Open("duckdb", "")
 	if err != nil {
 		return nil, fmt.Errorf("open duckdb: %w", err)

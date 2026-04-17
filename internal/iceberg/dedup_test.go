@@ -211,6 +211,64 @@ func TestBuildKeyString_NullSentinelInValue(t *testing.T) {
 	}
 }
 
+func TestDedupRows_CompositeKeyWithNulls(t *testing.T) {
+	// Composite key where one component is NULL. NULL keys must be handled
+	// correctly (NULL != NULL in SQL, but for dedup purposes we treat them
+	// as equal since they represent the same row).
+	rows := [][]pqbuilder.Value{
+		{val("a"), nullVal(), val("v1")},
+		{val("a"), val("1"), val("v2")},
+		{val("a"), nullVal(), val("v3")}, // supersedes first (same composite key)
+	}
+	keyColumns := []int{0, 1}
+
+	result := dedupRows(rows, keyColumns, nil)
+
+	if len(result) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(result))
+	}
+	// Verify the NULL-keyed row was deduped to v3.
+	for _, r := range result {
+		if r[1].IsNull && string(r[2].Data) != "v3" {
+			t.Errorf("NULL-keyed row should be v3, got %q", string(r[2].Data))
+		}
+	}
+}
+
+func TestDedupRows_LargeKeyValues(t *testing.T) {
+	// Key values exceeding 1KB. Ensures buildKeyString handles large values.
+	largeKey1 := make([]byte, 2000)
+	for i := range largeKey1 {
+		largeKey1[i] = 'A'
+	}
+	largeKey2 := make([]byte, 2000)
+	for i := range largeKey2 {
+		largeKey2[i] = 'B'
+	}
+
+	rows := [][]pqbuilder.Value{
+		{pqbuilder.Value{Data: largeKey1}, val("v1")},
+		{pqbuilder.Value{Data: largeKey2}, val("v2")},
+		{pqbuilder.Value{Data: largeKey1}, val("v3")}, // supersedes first
+	}
+	keyColumns := []int{0}
+
+	result := dedupRows(rows, keyColumns, nil)
+
+	if len(result) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(result))
+	}
+
+	// Find the row with largeKey1 and verify it's v3.
+	for _, r := range result {
+		if len(r[0].Data) == 2000 && r[0].Data[0] == 'A' {
+			if string(r[1].Data) != "v3" {
+				t.Errorf("large key A row should be v3, got %q", string(r[1].Data))
+			}
+		}
+	}
+}
+
 func TestFilterDeletedRows(t *testing.T) {
 	// Verify existing function still works correctly.
 	existing := [][]pqbuilder.Value{

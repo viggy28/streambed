@@ -62,7 +62,7 @@ type Options struct {
 	DataConn *pgconn.PgConn
 
 	State   *state.Store
-	S3      *storage.S3Client
+	S3      storage.ObjectStorage
 	Catalog *iceberg.Catalog
 	Logger  *slog.Logger
 }

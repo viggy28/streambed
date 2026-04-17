@@ -40,12 +40,12 @@ type EqDeleteFile struct {
 
 // Catalog manages Iceberg metadata on S3 using the filesystem catalog pattern.
 type Catalog struct {
-	storage *storage.S3Client
+	storage storage.ObjectStorage
 	bucket  string
 	prefix  string
 }
 
-func NewCatalog(s3Client *storage.S3Client, bucket, prefix string) *Catalog {
+func NewCatalog(s3Client storage.ObjectStorage, bucket, prefix string) *Catalog {
 	return &Catalog{
 		storage: s3Client,
 		bucket:  bucket,

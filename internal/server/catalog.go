@@ -24,7 +24,7 @@ type TableInfo struct {
 type TableCatalog struct {
 	s3Bucket string
 	s3Prefix string
-	s3Client *storage.S3Client
+	s3Client storage.ObjectStorage
 	logger   *slog.Logger
 
 	mu          sync.RWMutex
@@ -33,7 +33,7 @@ type TableCatalog struct {
 }
 
 // NewTableCatalog creates a new catalog that discovers tables under the given S3 prefix.
-func NewTableCatalog(s3Client *storage.S3Client, bucket, prefix string, logger *slog.Logger) *TableCatalog {
+func NewTableCatalog(s3Client storage.ObjectStorage, bucket, prefix string, logger *slog.Logger) *TableCatalog {
 	return &TableCatalog{
 		s3Bucket: bucket,
 		s3Prefix: prefix,

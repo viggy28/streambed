@@ -15,6 +15,21 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
+// ObjectStorage is the interface used by the iceberg catalog and writer to
+// interact with an S3-compatible object store. It enables fault injection
+// in tests by substituting a wrapper implementation.
+type ObjectStorage interface {
+	PutObject(ctx context.Context, key string, data []byte, contentType string) error
+	GetObject(ctx context.Context, key string) ([]byte, error)
+	HeadObject(ctx context.Context, key string) (bool, error)
+	ListPrefix(ctx context.Context, prefix string) ([]string, error)
+	DeleteObjects(ctx context.Context, keys []string) error
+	Bucket() string
+}
+
+// Compile-time check that S3Client satisfies ObjectStorage.
+var _ ObjectStorage = (*S3Client)(nil)
+
 type S3Client struct {
 	client *s3.Client
 	bucket string

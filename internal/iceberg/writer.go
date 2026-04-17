@@ -19,7 +19,7 @@ import (
 type Writer struct {
 	catalog       *Catalog
 	parquet       *pqbuilder.Builder
-	storage       *storage.S3Client
+	storage       storage.ObjectStorage
 	state         *state.Store
 	slotName      string
 	flushRows     int
@@ -53,7 +53,7 @@ type tableBuffer struct {
 
 func NewWriter(
 	catalog *Catalog,
-	s3Client *storage.S3Client,
+	s3Client storage.ObjectStorage,
 	stateStore *state.Store,
 	slotName string,
 	flushRows int,

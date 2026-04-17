@@ -1,10 +1,12 @@
 package iceberg
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
 	pqbuilder "github.com/viggy28/streambed/internal/parquet"
+	"github.com/viggy28/streambed/internal/storage"
 )
 
 // TestCommitEmptyTableMetadata verifies that commitEmptyTable produces
@@ -452,6 +454,217 @@ func TestTotalRecords(t *testing.T) {
 	if totalRecords(nil) != 0 {
 		t.Error("totalRecords(nil) should be 0")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Crash-Safety Tests using fault-injecting S3
+// ---------------------------------------------------------------------------
+
+// TestCommitChangeset_VersionHintWriteFail verifies that if PutObject fails
+// on version-hint.text (the last step), the old version is still readable
+// and a re-commit succeeds.
+func TestCommitChangeset_VersionHintWriteFail(t *testing.T) {
+	ctx := context.Background()
+
+	mem := storage.NewMemS3Client("test-bucket")
+	fault := storage.NewFaultS3Client(mem)
+
+	catalog := NewCatalog(fault, "test-bucket", "test-prefix")
+
+	// Create initial table.
+	cols := []ColumnDef{
+		{Name: "id", OID: 23},   // int4
+		{Name: "name", OID: 25}, // text
+	}
+	if err := catalog.CreateTable(ctx, "public", "crash_test", cols); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+
+	// Verify table exists at version 1.
+	exists, err := catalog.TableExists(ctx, "public", "crash_test")
+	if err != nil || !exists {
+		t.Fatalf("table should exist: exists=%v err=%v", exists, err)
+	}
+
+	// First successful commit to establish version 2.
+	err = catalog.CommitChangeset(ctx, "public", "crash_test",
+		&DataFile{Path: "data/file1.parquet", RowCount: 10, FileSize: 1000},
+		nil, false, "0/1234")
+	if err != nil {
+		t.Fatalf("first commit: %v", err)
+	}
+
+	// Now configure fault: fail on version-hint.text writes.
+	fault.FailOnKeyContaining("version-hint.text")
+
+	// Second commit should fail when trying to update version-hint.
+	err = catalog.CommitChangeset(ctx, "public", "crash_test",
+		&DataFile{Path: "data/file2.parquet", RowCount: 5, FileSize: 500},
+		nil, false, "0/5678")
+	if err == nil {
+		t.Fatal("expected error when version-hint write fails")
+	}
+	t.Logf("expected failure: %v", err)
+
+	// Remove fault — version-hint should still point to version 2.
+	fault.Reset()
+
+	// Verify: GetSnapshotFlushLSN should return the LSN from the first commit.
+	lsn, found, err := catalog.GetSnapshotFlushLSN(ctx, "public", "crash_test")
+	if err != nil {
+		t.Fatalf("GetSnapshotFlushLSN after failed commit: %v", err)
+	}
+	if !found {
+		t.Fatal("expected to find flush LSN after failed commit")
+	}
+	if lsn != "0/1234" {
+		t.Errorf("expected LSN 0/1234 (from first commit), got %s", lsn)
+	}
+
+	// Re-commit should succeed now.
+	err = catalog.CommitChangeset(ctx, "public", "crash_test",
+		&DataFile{Path: "data/file2.parquet", RowCount: 5, FileSize: 500},
+		nil, false, "0/5678")
+	if err != nil {
+		t.Fatalf("re-commit after fault cleared: %v", err)
+	}
+
+	// Verify new LSN.
+	lsn, found, err = catalog.GetSnapshotFlushLSN(ctx, "public", "crash_test")
+	if err != nil {
+		t.Fatalf("GetSnapshotFlushLSN after re-commit: %v", err)
+	}
+	if !found || lsn != "0/5678" {
+		t.Errorf("expected LSN 0/5678 after re-commit, got %s (found=%v)", lsn, found)
+	}
+}
+
+// TestCommitChangeset_ManifestWriteFail verifies that if PutObject fails on
+// a manifest file write, the commit returns an error and no partial state
+// is visible.
+func TestCommitChangeset_ManifestWriteFail(t *testing.T) {
+	ctx := context.Background()
+
+	mem := storage.NewMemS3Client("test-bucket")
+	fault := storage.NewFaultS3Client(mem)
+
+	catalog := NewCatalog(fault, "test-bucket", "test-prefix")
+
+	cols := []ColumnDef{
+		{Name: "id", OID: 23},
+		{Name: "name", OID: 25},
+	}
+	if err := catalog.CreateTable(ctx, "public", "manifest_test", cols); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+
+	// Fail on manifest file writes (.avro files that are not snap-*.avro).
+	fault.FailOnKeyContaining("-m0.avro")
+
+	err := catalog.CommitChangeset(ctx, "public", "manifest_test",
+		&DataFile{Path: "data/file1.parquet", RowCount: 10, FileSize: 1000},
+		nil, false, "0/1234")
+	if err == nil {
+		t.Fatal("expected error when manifest write fails")
+	}
+
+	// version-hint should still point to version 1 (CreateTable).
+	fault.Reset()
+	_, found, err := catalog.GetSnapshotFlushLSN(ctx, "public", "manifest_test")
+	if err != nil {
+		t.Fatalf("GetSnapshotFlushLSN: %v", err)
+	}
+	if found {
+		t.Error("should not find flush LSN — no successful commit happened")
+	}
+}
+
+// TestCommitChangeset_MetadataWriteFail verifies that if PutObject fails on
+// v<N+1>.metadata.json, the version-hint is NOT updated.
+func TestCommitChangeset_MetadataWriteFail(t *testing.T) {
+	ctx := context.Background()
+
+	mem := storage.NewMemS3Client("test-bucket")
+	fault := storage.NewFaultS3Client(mem)
+
+	catalog := NewCatalog(fault, "test-bucket", "test-prefix")
+
+	cols := []ColumnDef{
+		{Name: "id", OID: 23},
+		{Name: "name", OID: 25},
+	}
+	if err := catalog.CreateTable(ctx, "public", "meta_test", cols); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+
+	// Fail on v2.metadata.json write.
+	fault.FailOnKeyContaining("v2.metadata.json")
+
+	err := catalog.CommitChangeset(ctx, "public", "meta_test",
+		&DataFile{Path: "data/file1.parquet", RowCount: 10, FileSize: 1000},
+		nil, false, "0/1234")
+	if err == nil {
+		t.Fatal("expected error when metadata write fails")
+	}
+
+	// version-hint should still be "1".
+	fault.Reset()
+	hintData, err := mem.GetObject(ctx, "test-prefix/public/meta_test/metadata/version-hint.text")
+	if err != nil {
+		t.Fatalf("read version-hint: %v", err)
+	}
+	if string(hintData) != "1" {
+		t.Errorf("version-hint should still be 1, got %s", string(hintData))
+	}
+}
+
+// TestCommitChangeset_SuccessfulRoundTrip verifies the happy path: create table,
+// commit data, read back LSN and data file paths.
+func TestCommitChangeset_SuccessfulRoundTrip(t *testing.T) {
+	ctx := context.Background()
+
+	mem := storage.NewMemS3Client("test-bucket")
+	catalog := NewCatalog(mem, "test-bucket", "test-prefix")
+
+	cols := []ColumnDef{
+		{Name: "id", OID: 23},
+		{Name: "name", OID: 25},
+	}
+	if err := catalog.CreateTable(ctx, "public", "roundtrip", cols); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+
+	// Write a fake Parquet file so GetDataFilePaths can find it.
+	if err := mem.PutObject(ctx, "test-prefix/public/roundtrip/data/file1.parquet", []byte("fake"), ""); err != nil {
+		t.Fatalf("put parquet: %v", err)
+	}
+
+	// Commit.
+	err := catalog.CommitChangeset(ctx, "public", "roundtrip",
+		&DataFile{Path: "data/file1.parquet", RowCount: 42, FileSize: 1000},
+		nil, false, "0/ABCD")
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// Verify LSN.
+	lsn, found, err := catalog.GetSnapshotFlushLSN(ctx, "public", "roundtrip")
+	if err != nil {
+		t.Fatalf("get LSN: %v", err)
+	}
+	if !found || lsn != "0/ABCD" {
+		t.Errorf("LSN: got %q (found=%v), want 0/ABCD", lsn, found)
+	}
+
+	// Verify data file paths.
+	paths, err := catalog.GetDataFilePaths(ctx, "public", "roundtrip")
+	if err != nil {
+		t.Fatalf("get data file paths: %v", err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("expected 1 data file path, got %d", len(paths))
+	}
+	t.Logf("data file path: %s", paths[0])
 }
 
 func v(s string) pqbuilder.Value {
