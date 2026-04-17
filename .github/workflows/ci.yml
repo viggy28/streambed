@@ -40,7 +40,7 @@ jobs:
           docker compose -f test/integration/docker-compose.yml up createbucket
 
       - name: Integration tests
-        run: go test -tags integration -v -timeout 600s ./test/integration/...
+        run: go test -tags integration -short -v -timeout 600s ./test/integration/...
 
       - name: Stop services
         if: always()

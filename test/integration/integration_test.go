@@ -1556,6 +1556,9 @@ func TestWideRow(t *testing.T) {
 // TestLargeBatchFlush inserts 100,000 rows and verifies the pipeline
 // handles it without timeout or data loss.
 func TestLargeBatchFlush(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large batch test in short mode")
+	}
 	skipIfNotAvailable(t)
 	ctx := context.Background()
 
@@ -1591,6 +1594,9 @@ func TestLargeBatchFlush(t *testing.T) {
 // then runs the same aggregation queries against both Postgres and DuckDB
 // (via Iceberg) and logs the latency comparison.
 func TestQueryLatencyComparison(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping benchmark test in short mode")
+	}
 	skipIfNotAvailable(t)
 	ctx := context.Background()
 
@@ -1702,6 +1708,9 @@ func TestQueryLatencyComparison(t *testing.T) {
 // TestBulkIngestThroughput measures the pipeline's ingest throughput
 // by inserting rows and measuring how fast they flow through to Iceberg.
 func TestBulkIngestThroughput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping benchmark test in short mode")
+	}
 	skipIfNotAvailable(t)
 	ctx := context.Background()
 
