@@ -65,6 +65,9 @@ func TestLongRunningStability(t *testing.T) {
 // TestCrashMidFlush_DataRecovery inserts rows, cancels the pipeline mid-flush,
 // restarts, and uses the oracle to verify all data is present.
 func TestCrashMidFlush_DataRecovery(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping crash recovery test in short mode")
+	}
 	skipIfNotAvailable(t)
 	ctx := context.Background()
 
@@ -106,6 +109,9 @@ func TestCrashMidFlush_DataRecovery(t *testing.T) {
 // TestMultipleRestartsWithUpdates runs multiple restart cycles with interleaved
 // updates to verify dedup correctness across restarts.
 func TestMultipleRestartsWithUpdates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-restart update test in short mode")
+	}
 	skipIfNotAvailable(t)
 	ctx := context.Background()
 

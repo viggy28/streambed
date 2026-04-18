@@ -391,6 +391,9 @@ func TestOracleKeyLifecycle(t *testing.T) {
 // TestOracleRepeatedKillRestart runs 3 kill/restart cycles with interleaved
 // INSERTs and UPDATEs, checking the oracle after each restart.
 func TestOracleRepeatedKillRestart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-cycle kill/restart test in short mode")
+	}
 	skipIfNotAvailable(t)
 	ctx := context.Background()
 
@@ -435,6 +438,9 @@ func TestOracleRepeatedKillRestart(t *testing.T) {
 // TestOracleMultiTable verifies data integrity across 3 tables with
 // interleaved DML, checking each table independently.
 func TestOracleMultiTable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-table oracle test in short mode")
+	}
 	skipIfNotAvailable(t)
 	ctx := context.Background()
 
@@ -494,6 +500,9 @@ func TestOracleMultiTable(t *testing.T) {
 // TestOracleRapidUpdateSameKey sends 100 updates to the same row in rapid
 // succession and verifies the final value matches Postgres.
 func TestOracleRapidUpdateSameKey(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping rapid update test in short mode")
+	}
 	skipIfNotAvailable(t)
 	ctx := context.Background()
 
@@ -529,6 +538,9 @@ func TestOracleRapidUpdateSameKey(t *testing.T) {
 // TestOracleHighCardinalityDeletes inserts 1000 rows, deletes 999, and
 // verifies the single survivor matches Postgres.
 func TestOracleHighCardinalityDeletes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping high-cardinality delete test in short mode")
+	}
 	skipIfNotAvailable(t)
 	ctx := context.Background()
 
