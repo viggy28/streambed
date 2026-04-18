@@ -434,3 +434,140 @@ func TestDecodeUpdate_UnknownRelation(t *testing.T) {
 		t.Error("expected error for unknown relation")
 	}
 }
+
+func TestDiffRelationColumns_AddColumn(t *testing.T) {
+	old := []Column{
+		{Name: "id", OID: 23},
+		{Name: "name", OID: 25},
+	}
+	new := []Column{
+		{Name: "id", OID: 23},
+		{Name: "name", OID: 25},
+		{Name: "email", OID: 25},
+	}
+	changes := diffRelationColumns(old, new, []int{0}, []int{0})
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 change, got %d: %+v", len(changes), changes)
+	}
+	if changes[0].Type != SchemaChangeAdd || changes[0].Column != "email" {
+		t.Errorf("expected ADD email, got %+v", changes[0])
+	}
+}
+
+func TestDiffRelationColumns_DropColumn(t *testing.T) {
+	old := []Column{
+		{Name: "id", OID: 23},
+		{Name: "name", OID: 25},
+		{Name: "email", OID: 25},
+	}
+	new := []Column{
+		{Name: "id", OID: 23},
+		{Name: "name", OID: 25},
+	}
+	changes := diffRelationColumns(old, new, []int{0}, []int{0})
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 change, got %d: %+v", len(changes), changes)
+	}
+	if changes[0].Type != SchemaChangeDrop || changes[0].Column != "email" {
+		t.Errorf("expected DROP email, got %+v", changes[0])
+	}
+}
+
+func TestDiffRelationColumns_TypeChange(t *testing.T) {
+	old := []Column{
+		{Name: "id", OID: 23}, // int4
+		{Name: "count", OID: 23},
+	}
+	new := []Column{
+		{Name: "id", OID: 23},
+		{Name: "count", OID: 20}, // int8
+	}
+	changes := diffRelationColumns(old, new, []int{0}, []int{0})
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 change, got %d: %+v", len(changes), changes)
+	}
+	if changes[0].Type != SchemaChangeTypeChange || changes[0].OldOID != 23 || changes[0].NewOID != 20 {
+		t.Errorf("expected TYPE_CHANGE int4→int8, got %+v", changes[0])
+	}
+}
+
+func TestDiffRelationColumns_KeyChange(t *testing.T) {
+	cols := []Column{
+		{Name: "id", OID: 23},
+		{Name: "name", OID: 25},
+	}
+	changes := diffRelationColumns(cols, cols, []int{0}, []int{0, 1})
+	found := false
+	for _, ch := range changes {
+		if ch.Type == SchemaChangeKeyChange {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected KEY_CHANGE, got none")
+	}
+}
+
+func TestDiffRelationColumns_NoChanges(t *testing.T) {
+	cols := []Column{
+		{Name: "id", OID: 23},
+		{Name: "name", OID: 25},
+	}
+	changes := diffRelationColumns(cols, cols, []int{0}, []int{0})
+	if len(changes) != 0 {
+		t.Errorf("expected no changes, got %+v", changes)
+	}
+}
+
+func TestDecodeRelation_DetectsSchemaChange(t *testing.T) {
+	d := testDecoder()
+
+	// First relation — no changes expected.
+	d.Decode(&pglogrepl.RelationMessage{
+		RelationID:   16384,
+		Namespace:    "public",
+		RelationName: "orders",
+		Columns: []*pglogrepl.RelationMessageColumn{
+			{Name: "id", DataType: 23},
+			{Name: "name", DataType: 25},
+		},
+	})
+
+	// Second relation with same ID but ADD COLUMN.
+	result, _ := d.Decode(&pglogrepl.RelationMessage{
+		RelationID:   16384,
+		Namespace:    "public",
+		RelationName: "orders",
+		Columns: []*pglogrepl.RelationMessageColumn{
+			{Name: "id", DataType: 23},
+			{Name: "name", DataType: 25},
+			{Name: "email", DataType: 25},
+		},
+	})
+
+	rel := result.(*RelationMessage)
+	if len(rel.Changes) != 1 {
+		t.Fatalf("expected 1 change, got %d", len(rel.Changes))
+	}
+	if rel.Changes[0].Type != SchemaChangeAdd || rel.Changes[0].Column != "email" {
+		t.Errorf("expected ADD email, got %+v", rel.Changes[0])
+	}
+}
+
+func TestDecodeRelation_FirstDiscoveryNoChanges(t *testing.T) {
+	d := testDecoder()
+
+	result, _ := d.Decode(&pglogrepl.RelationMessage{
+		RelationID:   16384,
+		Namespace:    "public",
+		RelationName: "orders",
+		Columns: []*pglogrepl.RelationMessageColumn{
+			{Name: "id", DataType: 23},
+		},
+	})
+
+	rel := result.(*RelationMessage)
+	if len(rel.Changes) != 0 {
+		t.Errorf("expected no changes on first discovery, got %+v", rel.Changes)
+	}
+}

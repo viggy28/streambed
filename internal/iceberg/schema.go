@@ -1,5 +1,7 @@
 package iceberg
 
+import "fmt"
+
 // IcebergType represents an Iceberg type string used in metadata JSON.
 type IcebergType = string
 
@@ -16,6 +18,27 @@ const (
 	TypeUUID        IcebergType = "uuid"
 	TypeBinary      IcebergType = "binary"
 )
+
+// ValidateTypeWidening checks whether changing an Iceberg column from
+// oldType to newType is a compatible widening. Returns nil if the change
+// is allowed, or an error describing why it is not.
+//
+// Allowed widenings per the Iceberg spec:
+//   - int → long
+//   - float → double
+func ValidateTypeWidening(oldType, newType IcebergType) error {
+	if oldType == newType {
+		return nil
+	}
+	switch {
+	case oldType == TypeInt && newType == TypeLong:
+		return nil
+	case oldType == TypeFloat && newType == TypeDouble:
+		return nil
+	default:
+		return fmt.Errorf("incompatible type change: %s → %s (only int→long and float→double are supported)", oldType, newType)
+	}
+}
 
 // PgOIDToIcebergType maps a Postgres OID to its Iceberg type string.
 func PgOIDToIcebergType(oid uint32) IcebergType {

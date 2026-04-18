@@ -137,7 +137,7 @@ func Run(ctx context.Context, opts Options) (Stats, error) {
 				return fmt.Errorf("check table exists: %w", err)
 			}
 			if !exists {
-				if err := opts.Catalog.CreateTable(ctx, opts.Schema, opts.Table, icebergCols); err != nil {
+				if _, err := opts.Catalog.CreateTable(ctx, opts.Schema, opts.Table, icebergCols); err != nil {
 					return fmt.Errorf("create iceberg table: %w", err)
 				}
 			}

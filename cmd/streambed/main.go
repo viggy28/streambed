@@ -17,6 +17,7 @@ import (
 	_ "net/http/pprof"
 
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -236,6 +237,15 @@ func runSync(cmd *cobra.Command, args []string) error {
 	}
 	defer pgConn.Close(context.Background())
 
+	// Open a regular (non-replication) connection for metadata queries
+	// (column defaults on schema changes, etc.).
+	metaConn, err := pgx.Connect(ctx, cfg.SourceURL)
+	if err != nil {
+		return fmt.Errorf("connect to postgres (metadata): %w", err)
+	}
+	defer metaConn.Close(context.Background())
+	metaQuerier := wal.NewMetadataQuerier(metaConn)
+
 	// Create publication
 	pubName := cfg.SlotName // use same name for publication
 	if err := wal.CreatePublication(ctx, pgConn, pubName, cfg.IncludeTables, logger); err != nil {
@@ -311,7 +321,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 	// Create unified pipeline (single goroutine: reads WAL + writes Iceberg)
 	p := pipeline.New(pgConn, cfg.SlotName, pubName, startLSN, cfg.ExcludeTables,
-		logger, stateStore, tableFlushLSN, writer, cfg.FlushInterval)
+		logger, stateStore, tableFlushLSN, writer, cfg.FlushInterval, metaQuerier)
 
 	// Run blocks until ctx is cancelled; does final flush internally.
 	// On non-context errors (e.g. Postgres disconnect, transient S3
@@ -399,7 +409,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 		writer = iceberg.NewWriter(catalog, s3Client, stateStore, cfg.SlotName,
 			cfg.FlushRows, cfg.FlushInterval, logger)
 		p = pipeline.New(pgConn, cfg.SlotName, pubName, startLSN, cfg.ExcludeTables,
-			logger, stateStore, tableFlushLSN, writer, cfg.FlushInterval)
+			logger, stateStore, tableFlushLSN, writer, cfg.FlushInterval, metaQuerier)
 
 		logger.Info("reconnected, resuming pipeline",
 			"start_lsn", startLSN,

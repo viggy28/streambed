@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/marcboeker/go-duckdb"
 	pqgo "github.com/parquet-go/parquet-go"
@@ -220,9 +221,17 @@ func runSync(t *testing.T, ctx context.Context, duration time.Duration, statePat
 	writer := iceberg.NewWriter(catalog, s3Client, stateStore, slotName,
 		flushRows, 5*time.Second, logger)
 
+	// Open metadata connection for schema evolution queries.
+	metaConn, err := pgx.Connect(ctx, pgConnStr())
+	if err != nil {
+		t.Fatalf("connect metadata: %v", err)
+	}
+	defer metaConn.Close(context.Background())
+	metaQuerier := wal.NewMetadataQuerier(metaConn)
+
 	// Create unified pipeline
 	p := pipeline.New(pgConn, slotName, slotName, startLSN, nil,
-		logger, stateStore, tableFlushLSN, writer, 5*time.Second)
+		logger, stateStore, tableFlushLSN, writer, 5*time.Second, metaQuerier)
 
 	// Run with timeout
 	syncCtx, cancel := context.WithTimeout(ctx, duration)

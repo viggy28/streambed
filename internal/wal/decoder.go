@@ -26,7 +26,7 @@ func (d *Decoder) Relations() map[uint32]*RelationMessage {
 }
 
 // Decode takes a pglogrepl.Message and returns a typed event.
-// Returns nil for messages we don't handle in Phase 1.
+// Returns nil for messages we don't handle currently.
 func (d *Decoder) Decode(msg pglogrepl.Message) (interface{}, error) {
 	switch m := msg.(type) {
 	case *pglogrepl.RelationMessage:
@@ -76,21 +76,108 @@ func (d *Decoder) decodeRelation(m *pglogrepl.RelationMessage) *RelationMessage 
 			keyIdx = append(keyIdx, i)
 		}
 	}
+
+	// Detect schema changes if we already have a cached relation.
+	var changes []SchemaChange
+	if prev, exists := d.relations[m.RelationID]; exists {
+		changes = diffRelationColumns(prev.Columns, cols, prev.KeyColumnIndexes, keyIdx)
+	}
+
 	rel := &RelationMessage{
 		RelationID:       m.RelationID,
 		Namespace:        m.Namespace,
 		Name:             m.RelationName,
 		Columns:          cols,
 		KeyColumnIndexes: keyIdx,
+		Changes:          changes,
 	}
 	d.relations[m.RelationID] = rel
-	d.logger.Info("relation discovered",
-		"schema", rel.Namespace,
-		"table", rel.Name,
-		"columns", len(rel.Columns),
-		"key_columns", len(keyIdx),
-	)
+
+	if len(changes) > 0 {
+		d.logger.Info("relation schema changed",
+			"schema", rel.Namespace,
+			"table", rel.Name,
+			"columns", len(rel.Columns),
+			"key_columns", len(keyIdx),
+			"changes", len(changes),
+		)
+	} else {
+		d.logger.Info("relation discovered",
+			"schema", rel.Namespace,
+			"table", rel.Name,
+			"columns", len(rel.Columns),
+			"key_columns", len(keyIdx),
+		)
+	}
 	return rel
+}
+
+// diffRelationColumns compares old and new column lists by name to detect
+// ADD, DROP, and TYPE_CHANGE. It also detects REPLICA IDENTITY key changes.
+func diffRelationColumns(oldCols, newCols []Column, oldKeyIdx, newKeyIdx []int) []SchemaChange {
+	var changes []SchemaChange
+
+	oldByName := make(map[string]Column, len(oldCols))
+	for _, c := range oldCols {
+		oldByName[c.Name] = c
+	}
+	newByName := make(map[string]Column, len(newCols))
+	for _, c := range newCols {
+		newByName[c.Name] = c
+	}
+
+	// Detect DROP and TYPE_CHANGE.
+	for _, old := range oldCols {
+		if new, exists := newByName[old.Name]; exists {
+			if old.OID != new.OID {
+				changes = append(changes, SchemaChange{
+					Type:   SchemaChangeTypeChange,
+					Column: old.Name,
+					OldOID: old.OID,
+					NewOID: new.OID,
+				})
+			}
+		} else {
+			changes = append(changes, SchemaChange{
+				Type:   SchemaChangeDrop,
+				Column: old.Name,
+				OldOID: old.OID,
+			})
+		}
+	}
+
+	// Detect ADD.
+	for _, new := range newCols {
+		if _, exists := oldByName[new.Name]; !exists {
+			changes = append(changes, SchemaChange{
+				Type:   SchemaChangeAdd,
+				Column: new.Name,
+				NewOID: new.OID,
+			})
+		}
+	}
+
+	// Detect KEY_CHANGE (replica identity change).
+	if !equalIntSlice(oldKeyIdx, newKeyIdx) {
+		changes = append(changes, SchemaChange{
+			Type:   SchemaChangeKeyChange,
+			Column: "", // applies to the whole table
+		})
+	}
+
+	return changes
+}
+
+func equalIntSlice(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // decodeTuple turns a pgoutput TupleData into ColumnValue slice using the

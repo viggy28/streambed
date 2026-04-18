@@ -12,6 +12,7 @@ import (
 	ice "github.com/apache/iceberg-go"
 	"github.com/google/uuid"
 	"github.com/viggy28/streambed/internal/storage"
+	"github.com/viggy28/streambed/internal/wal"
 )
 
 // ColumnDef describes a table column for Iceberg metadata.
@@ -64,19 +65,23 @@ func (c *Catalog) TableExists(ctx context.Context, schema, table string) (bool, 
 }
 
 // CreateTable creates initial Iceberg v2 metadata for a new table (no snapshots).
-func (c *Catalog) CreateTable(ctx context.Context, schema, table string, columns []ColumnDef) error {
+// Returns the field ID mapping (column name → Iceberg field ID) assigned to the table.
+func (c *Catalog) CreateTable(ctx context.Context, schema, table string, columns []ColumnDef) (map[string]int, error) {
 	tableLoc := fmt.Sprintf("s3://%s/%s", c.bucket, c.tablePath(schema, table))
 	tableUUID := uuid.New().String()
 	now := time.Now().UnixMilli()
 
+	fieldIDs := make(map[string]int, len(columns))
 	fields := make([]schemaField, len(columns))
 	for i, col := range columns {
+		id := i + 1
 		fields[i] = schemaField{
-			ID:       i + 1,
+			ID:       id,
 			Name:     col.Name,
 			Required: false,
 			Type:     PgOIDToIcebergType(col.OID),
 		}
+		fieldIDs[col.Name] = id
 	}
 
 	metadata := tableMetadata{
@@ -112,7 +117,7 @@ func (c *Catalog) CreateTable(ctx context.Context, schema, table string, columns
 
 	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal metadata: %w", err)
+		return nil, fmt.Errorf("marshal metadata: %w", err)
 	}
 
 	basePath := c.tablePath(schema, table)
@@ -120,12 +125,241 @@ func (c *Catalog) CreateTable(ctx context.Context, schema, table string, columns
 	// Write v1.metadata.json (DuckDB looks for v<N>.metadata.json)
 	metaKey := path.Join(basePath, "metadata", "v1.metadata.json")
 	if err := c.storage.PutObject(ctx, metaKey, metadataJSON, "application/json"); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Write version-hint.text
 	hintKey := path.Join(basePath, "metadata", "version-hint.text")
-	return c.storage.PutObject(ctx, hintKey, []byte("1"), "text/plain")
+	if err := c.storage.PutObject(ctx, hintKey, []byte("1"), "text/plain"); err != nil {
+		return nil, err
+	}
+	return fieldIDs, nil
+}
+
+// SchemaFieldInfo describes a single field in the current Iceberg schema.
+// Exported so the writer can diff WAL columns against Iceberg on restart.
+type SchemaFieldInfo struct {
+	ID   int
+	Name string
+	Type IcebergType
+}
+
+// GetFieldIDs reads the current Iceberg metadata for a table and returns
+// the field ID mapping (column name → Iceberg field ID) and the lastColumnID.
+// Returns an error if the table does not exist or metadata is unreadable.
+func (c *Catalog) GetFieldIDs(ctx context.Context, schema, table string) (map[string]int, int, error) {
+	basePath := c.tablePath(schema, table)
+
+	hintKey := path.Join(basePath, "metadata", "version-hint.text")
+	hintData, err := c.storage.GetObject(ctx, hintKey)
+	if err != nil {
+		return nil, 0, fmt.Errorf("read version-hint: %w", err)
+	}
+	version, err := strconv.Atoi(string(hintData))
+	if err != nil {
+		return nil, 0, fmt.Errorf("parse version hint: %w", err)
+	}
+
+	metaKey := path.Join(basePath, "metadata", fmt.Sprintf("v%d.metadata.json", version))
+	metaData, err := c.storage.GetObject(ctx, metaKey)
+	if err != nil {
+		return nil, 0, fmt.Errorf("read metadata: %w", err)
+	}
+	var metadata tableMetadata
+	if err := json.Unmarshal(metaData, &metadata); err != nil {
+		return nil, 0, fmt.Errorf("parse metadata: %w", err)
+	}
+
+	if len(metadata.Schemas) == 0 {
+		return nil, 0, fmt.Errorf("no schemas in metadata")
+	}
+
+	currentSchema := metadata.Schemas[metadata.CurrentSchemaID]
+	fieldIDs := make(map[string]int, len(currentSchema.Fields))
+	for _, f := range currentSchema.Fields {
+		fieldIDs[f.Name] = f.ID
+	}
+	return fieldIDs, metadata.LastColumnID, nil
+}
+
+// GetSchemaFields reads the current Iceberg schema for a table and returns
+// the list of fields with their IDs, names, and types. Used by the writer
+// to reconcile WAL-provided columns against Iceberg on restart.
+func (c *Catalog) GetSchemaFields(ctx context.Context, schema, table string) ([]SchemaFieldInfo, error) {
+	basePath := c.tablePath(schema, table)
+
+	hintKey := path.Join(basePath, "metadata", "version-hint.text")
+	hintData, err := c.storage.GetObject(ctx, hintKey)
+	if err != nil {
+		return nil, fmt.Errorf("read version-hint: %w", err)
+	}
+	version, err := strconv.Atoi(string(hintData))
+	if err != nil {
+		return nil, fmt.Errorf("parse version hint: %w", err)
+	}
+
+	metaKey := path.Join(basePath, "metadata", fmt.Sprintf("v%d.metadata.json", version))
+	metaData, err := c.storage.GetObject(ctx, metaKey)
+	if err != nil {
+		return nil, fmt.Errorf("read metadata: %w", err)
+	}
+	var metadata tableMetadata
+	if err := json.Unmarshal(metaData, &metadata); err != nil {
+		return nil, fmt.Errorf("parse metadata: %w", err)
+	}
+
+	if len(metadata.Schemas) == 0 {
+		return nil, fmt.Errorf("no schemas in metadata")
+	}
+
+	currentSchema := metadata.Schemas[metadata.CurrentSchemaID]
+	fields := make([]SchemaFieldInfo, len(currentSchema.Fields))
+	for i, f := range currentSchema.Fields {
+		fields[i] = SchemaFieldInfo{ID: f.ID, Name: f.Name, Type: f.Type}
+	}
+	return fields, nil
+}
+
+// EvolveSchema applies schema changes (ADD, DROP, TYPE_CHANGE) to the
+// Iceberg table metadata. It reads the current metadata, computes the new
+// schema, writes a new metadata version, and returns the updated field ID
+// mapping.
+//
+// For ADD columns, defaults maps column names to their Postgres default
+// expression (used to set Iceberg's initial-default). Pass nil if no
+// defaults are available.
+func (c *Catalog) EvolveSchema(
+	ctx context.Context,
+	schema, table string,
+	changes []wal.SchemaChange,
+	newColumns []wal.Column,
+	defaults map[string]string,
+) (map[string]int, error) {
+	basePath := c.tablePath(schema, table)
+
+	// 1. Read current version.
+	hintKey := path.Join(basePath, "metadata", "version-hint.text")
+	hintData, err := c.storage.GetObject(ctx, hintKey)
+	if err != nil {
+		return nil, fmt.Errorf("read version-hint: %w", err)
+	}
+	currentVersion, err := strconv.Atoi(string(hintData))
+	if err != nil {
+		return nil, fmt.Errorf("parse version hint: %w", err)
+	}
+
+	// 2. Read current metadata.
+	currentMetaKey := path.Join(basePath, "metadata", fmt.Sprintf("v%d.metadata.json", currentVersion))
+	metaData, err := c.storage.GetObject(ctx, currentMetaKey)
+	if err != nil {
+		return nil, fmt.Errorf("read metadata v%d: %w", currentVersion, err)
+	}
+	var metadata tableMetadata
+	if err := json.Unmarshal(metaData, &metadata); err != nil {
+		return nil, fmt.Errorf("parse metadata: %w", err)
+	}
+
+	if len(metadata.Schemas) == 0 {
+		return nil, fmt.Errorf("no schemas in metadata for %s.%s", schema, table)
+	}
+
+	// 3. Build the evolved schema from the current one.
+	oldSchema := metadata.Schemas[metadata.CurrentSchemaID]
+	oldFieldsByName := make(map[string]schemaField, len(oldSchema.Fields))
+	for _, f := range oldSchema.Fields {
+		oldFieldsByName[f.Name] = f
+	}
+
+	lastColID := metadata.LastColumnID
+	var newFields []schemaField
+
+	// Start with existing fields, applying DROP and TYPE_CHANGE.
+	dropSet := make(map[string]bool)
+	typeChanges := make(map[string]wal.SchemaChange)
+	for _, ch := range changes {
+		switch ch.Type {
+		case wal.SchemaChangeDrop:
+			dropSet[ch.Column] = true
+		case wal.SchemaChangeTypeChange:
+			typeChanges[ch.Column] = ch
+		}
+	}
+
+	for _, f := range oldSchema.Fields {
+		if dropSet[f.Name] {
+			continue // dropped
+		}
+		if ch, changed := typeChanges[f.Name]; changed {
+			oldType := f.Type
+			newType := PgOIDToIcebergType(ch.NewOID)
+			if err := ValidateTypeWidening(oldType, newType); err != nil {
+				return nil, fmt.Errorf("column %q: %w", f.Name, err)
+			}
+			f.Type = newType
+		}
+		newFields = append(newFields, f)
+	}
+
+	// Apply ADD columns.
+	for _, ch := range changes {
+		if ch.Type != wal.SchemaChangeAdd {
+			continue
+		}
+		lastColID++
+		sf := schemaField{
+			ID:       lastColID,
+			Name:     ch.Column,
+			Required: false,
+			Type:     PgOIDToIcebergType(ch.NewOID),
+		}
+		if defaults != nil {
+			if defVal, ok := defaults[ch.Column]; ok && defVal != "" {
+				sf.InitialDefault = defVal
+				sf.WriteDefault = defVal
+			}
+		}
+		newFields = append(newFields, sf)
+	}
+
+	// 4. Create new schema entry.
+	newSchemaID := oldSchema.SchemaID + 1
+	evolvedSchema := icebergSchema{
+		Type:            "struct",
+		SchemaID:        newSchemaID,
+		Fields:          newFields,
+		IdentifierField: []int{},
+	}
+
+	metadata.Schemas = append(metadata.Schemas, evolvedSchema)
+	metadata.CurrentSchemaID = newSchemaID
+	metadata.LastColumnID = lastColID
+	metadata.LastUpdatedMS = time.Now().UnixMilli()
+	metadata.MetadataLog = append(metadata.MetadataLog, metadataLogEntry{
+		TimestampMS:  metadata.LastUpdatedMS,
+		MetadataFile: fmt.Sprintf("s3://%s/%s", c.bucket, currentMetaKey),
+	})
+
+	// 5. Write new metadata version.
+	newVersion := currentVersion + 1
+	newMetadataJSON, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal evolved metadata: %w", err)
+	}
+
+	newMetaKey := path.Join(basePath, "metadata", fmt.Sprintf("v%d.metadata.json", newVersion))
+	if err := c.storage.PutObject(ctx, newMetaKey, newMetadataJSON, "application/json"); err != nil {
+		return nil, err
+	}
+	if err := c.storage.PutObject(ctx, hintKey, []byte(strconv.Itoa(newVersion)), "text/plain"); err != nil {
+		return nil, err
+	}
+
+	// 6. Build and return field ID mapping.
+	fieldIDs := make(map[string]int, len(newFields))
+	for _, f := range newFields {
+		fieldIDs[f.Name] = f.ID
+	}
+	return fieldIDs, nil
 }
 
 // GetDataFilePaths returns the S3 paths of all data files in the current
@@ -665,10 +899,12 @@ type icebergSchema struct {
 }
 
 type schemaField struct {
-	ID       int    `json:"id"`
-	Name     string `json:"name"`
-	Required bool   `json:"required"`
-	Type     string `json:"type"`
+	ID             int    `json:"id"`
+	Name           string `json:"name"`
+	Required       bool   `json:"required"`
+	Type           string `json:"type"`
+	InitialDefault string `json:"initial-default,omitempty"`
+	WriteDefault   string `json:"write-default,omitempty"`
 }
 
 type partitionSpec struct {
