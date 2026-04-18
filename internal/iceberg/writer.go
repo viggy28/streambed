@@ -34,7 +34,11 @@ type tableBuffer struct {
 	Table      string
 	Columns    []wal.Column
 	KeyColumns []int // positions into Columns; stamped once from first event
-	Rows       [][]pqbuilder.Value
+	// fieldIDs maps column names to their Iceberg field IDs. Populated on
+	// first flush (from CreateTable) or schema evolution (from EvolveSchema).
+	// When nil, flush() falls back to positional IDs (i+1).
+	fieldIDs map[string]int
+	Rows     [][]pqbuilder.Value
 	// Deletes holds equality-delete keys, one per row. Each inner slice
 	// is aligned with KeyColumns: Deletes[i][j] is the value of the
 	// j-th key column for the i-th pending delete.
@@ -94,6 +98,137 @@ func (w *Writer) HandleEvent(ctx context.Context, event wal.RowEvent) (transitio
 		}
 	}
 	return transitioned, nil
+}
+
+// HandleSchemaChange is called when the pipeline detects that a
+// RelationMessage carries schema changes for a known table. It:
+//  1. Flushes any buffered rows with the OLD schema.
+//  2. Evolves the Iceberg table metadata (adds/drops/widens columns).
+//  3. Updates the buffer's column list and field ID mapping.
+//
+// defaults maps added column names to their Postgres DEFAULT expression
+// (used for Iceberg initial-default). May be nil.
+func (w *Writer) HandleSchemaChange(ctx context.Context, rel *wal.RelationMessage, defaults map[string]string) error {
+	key := fmt.Sprintf("%s.%s", rel.Namespace, rel.Name)
+
+	// 1. Flush existing buffer with OLD schema.
+	if buf, exists := w.buffers[key]; exists {
+		if len(buf.Rows) > 0 || len(buf.Deletes) > 0 {
+			w.logger.Info("flushing buffer before schema evolution",
+				"table", key,
+				"rows", len(buf.Rows),
+				"deletes", len(buf.Deletes),
+			)
+			if err := w.flush(ctx, key); err != nil {
+				return fmt.Errorf("pre-evolution flush for %s: %w", key, err)
+			}
+		}
+	}
+
+	// 2. Evolve Iceberg schema if the table already exists.
+	tableExists, err := w.catalog.TableExists(ctx, rel.Namespace, rel.Name)
+	if err != nil {
+		return fmt.Errorf("check table %s: %w", key, err)
+	}
+
+	buf, exists := w.buffers[key]
+	if !exists {
+		buf = &tableBuffer{
+			Schema: rel.Namespace,
+			Table:  rel.Name,
+		}
+		w.buffers[key] = buf
+	}
+
+	if tableExists {
+		fids, err := w.catalog.EvolveSchema(ctx, rel.Namespace, rel.Name,
+			rel.Changes, rel.Columns, defaults)
+		if err != nil {
+			return fmt.Errorf("evolve schema for %s: %w", key, err)
+		}
+		buf.fieldIDs = fids
+		w.logger.Info("schema evolved",
+			"table", key,
+			"changes", len(rel.Changes),
+			"field_ids", len(fids),
+		)
+	}
+
+	// 3. Update buffer with new schema.
+	buf.Columns = rel.Columns
+	buf.KeyColumns = rel.KeyColumnIndexes
+
+	// Update state store with new column count.
+	w.state.RegisterTable(rel.Namespace, rel.Name, len(rel.Columns))
+
+	return nil
+}
+
+// reconcileWithIceberg compares the WAL-provided columns in the buffer
+// against the current Iceberg schema. Returns the field ID mapping from
+// Iceberg and any schema changes detected. This handles DDL that occurred
+// while the pipeline was stopped — on restart the decoder has no cached
+// relation to diff against, so the writer must diff against Iceberg.
+func (w *Writer) reconcileWithIceberg(ctx context.Context, buf *tableBuffer) (map[string]int, []wal.SchemaChange, error) {
+	iceFields, err := w.catalog.GetSchemaFields(ctx, buf.Schema, buf.Table)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Build maps for diffing.
+	iceByName := make(map[string]SchemaFieldInfo, len(iceFields))
+	for _, f := range iceFields {
+		iceByName[f.Name] = f
+	}
+	walByName := make(map[string]wal.Column, len(buf.Columns))
+	for _, c := range buf.Columns {
+		walByName[c.Name] = c
+	}
+
+	var changes []wal.SchemaChange
+
+	// Columns in Iceberg but not in WAL → DROP.
+	for _, f := range iceFields {
+		if _, exists := walByName[f.Name]; !exists {
+			changes = append(changes, wal.SchemaChange{
+				Type:   wal.SchemaChangeDrop,
+				Column: f.Name,
+			})
+		}
+	}
+
+	// Columns in WAL but not in Iceberg → ADD.
+	// Columns in both but with different type → TYPE_CHANGE.
+	for _, c := range buf.Columns {
+		iceField, exists := iceByName[c.Name]
+		if !exists {
+			changes = append(changes, wal.SchemaChange{
+				Type:   wal.SchemaChangeAdd,
+				Column: c.Name,
+				NewOID: c.OID,
+			})
+		} else {
+			walType := PgOIDToIcebergType(c.OID)
+			if walType != iceField.Type {
+				changes = append(changes, wal.SchemaChange{
+					Type:   wal.SchemaChangeTypeChange,
+					Column: c.Name,
+					NewOID: c.OID,
+				})
+			}
+		}
+	}
+
+	// If no changes, just return the existing field IDs.
+	if len(changes) == 0 {
+		fids := make(map[string]int, len(iceFields))
+		for _, f := range iceFields {
+			fids[f.Name] = f.ID
+		}
+		return fids, nil, nil
+	}
+
+	return nil, changes, nil
 }
 
 // buffer appends an event to the per-table buffer. Returns true if this
@@ -199,10 +334,16 @@ func (w *Writer) flush(ctx context.Context, key string) error {
 	rowCount := len(buf.Rows)
 	delCount := len(buf.Deletes)
 
-	// Convert full-table columns for parquet builder.
+	// Convert full-table columns for parquet builder, stamping field IDs
+	// from the buffer's mapping so Parquet columns carry stable Iceberg IDs.
 	cols := make([]pqbuilder.ColumnDef, len(buf.Columns))
 	for i, c := range buf.Columns {
 		cols[i] = pqbuilder.ColumnDef{Name: c.Name, OID: c.OID}
+		if buf.fieldIDs != nil {
+			if fid, ok := buf.fieldIDs[c.Name]; ok {
+				cols[i].FieldID = fid
+			}
+		}
 	}
 
 	// Ensure Iceberg table exists before writing anything.
@@ -221,9 +362,31 @@ func (w *Writer) flush(ctx context.Context, key string) error {
 		for i, c := range buf.Columns {
 			icebergCols[i] = ColumnDef{Name: c.Name, OID: c.OID}
 		}
-		if err := w.catalog.CreateTable(ctx, buf.Schema, buf.Table, icebergCols); err != nil {
+		fids, err := w.catalog.CreateTable(ctx, buf.Schema, buf.Table, icebergCols)
+		if err != nil {
 			return fmt.Errorf("create table %s: %w", key, err)
 		}
+		buf.fieldIDs = fids
+	} else if buf.fieldIDs == nil {
+		// Table exists in Iceberg but we have no field IDs cached (e.g.
+		// after a restart). Reconcile WAL columns against the Iceberg
+		// schema: if they differ, a DDL happened while we were down.
+		fids, changes, err := w.reconcileWithIceberg(ctx, buf)
+		if err != nil {
+			return fmt.Errorf("reconcile schema for %s: %w", key, err)
+		}
+		if len(changes) > 0 {
+			w.logger.Info("schema drift detected on restart, evolving Iceberg",
+				"table", key,
+				"changes", len(changes),
+			)
+			fids, err = w.catalog.EvolveSchema(ctx, buf.Schema, buf.Table,
+				changes, buf.Columns, nil)
+			if err != nil {
+				return fmt.Errorf("evolve schema on restart for %s: %w", key, err)
+			}
+		}
+		buf.fieldIDs = fids
 	}
 
 	var dataFile *DataFile

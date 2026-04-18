@@ -476,7 +476,7 @@ func TestCommitChangeset_VersionHintWriteFail(t *testing.T) {
 		{Name: "id", OID: 23},   // int4
 		{Name: "name", OID: 25}, // text
 	}
-	if err := catalog.CreateTable(ctx, "public", "crash_test", cols); err != nil {
+	if _, err := catalog.CreateTable(ctx, "public", "crash_test", cols); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
 
@@ -554,7 +554,7 @@ func TestCommitChangeset_ManifestWriteFail(t *testing.T) {
 		{Name: "id", OID: 23},
 		{Name: "name", OID: 25},
 	}
-	if err := catalog.CreateTable(ctx, "public", "manifest_test", cols); err != nil {
+	if _, err := catalog.CreateTable(ctx, "public", "manifest_test", cols); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
 
@@ -593,7 +593,7 @@ func TestCommitChangeset_MetadataWriteFail(t *testing.T) {
 		{Name: "id", OID: 23},
 		{Name: "name", OID: 25},
 	}
-	if err := catalog.CreateTable(ctx, "public", "meta_test", cols); err != nil {
+	if _, err := catalog.CreateTable(ctx, "public", "meta_test", cols); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
 
@@ -630,7 +630,7 @@ func TestCommitChangeset_SuccessfulRoundTrip(t *testing.T) {
 		{Name: "id", OID: 23},
 		{Name: "name", OID: 25},
 	}
-	if err := catalog.CreateTable(ctx, "public", "roundtrip", cols); err != nil {
+	if _, err := catalog.CreateTable(ctx, "public", "roundtrip", cols); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
 

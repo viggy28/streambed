@@ -2,6 +2,41 @@ package wal
 
 import "github.com/jackc/pglogrepl"
 
+// SchemaChangeType identifies the kind of schema modification detected
+// when comparing consecutive RelationMessages for the same table.
+type SchemaChangeType int
+
+const (
+	SchemaChangeAdd        SchemaChangeType = iota // new column added
+	SchemaChangeDrop                               // existing column removed
+	SchemaChangeTypeChange                         // column OID changed (ALTER TYPE)
+	SchemaChangeKeyChange                          // REPLICA IDENTITY columns changed
+)
+
+func (t SchemaChangeType) String() string {
+	switch t {
+	case SchemaChangeAdd:
+		return "ADD"
+	case SchemaChangeDrop:
+		return "DROP"
+	case SchemaChangeTypeChange:
+		return "TYPE_CHANGE"
+	case SchemaChangeKeyChange:
+		return "KEY_CHANGE"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// SchemaChange describes a single column-level change between two
+// RelationMessages for the same table.
+type SchemaChange struct {
+	Type   SchemaChangeType
+	Column string // column name (new name for ADD, old name for DROP)
+	OldOID uint32 // previous OID (0 for ADD)
+	NewOID uint32 // new OID (0 for DROP)
+}
+
 // Column describes a single column from a Postgres Relation message.
 // IsKey is true when the column is part of the table's REPLICA IDENTITY
 // (the "key" flag in pgoutput). These are the columns we can safely use
@@ -25,6 +60,9 @@ type RelationMessage struct {
 	Name             string
 	Columns          []Column
 	KeyColumnIndexes []int
+	// Changes is populated when this RelationMessage represents a schema
+	// modification of a previously-known table. Empty for first discovery.
+	Changes []SchemaChange
 }
 
 // ColumnValue holds a single decoded column value from a WAL tuple.

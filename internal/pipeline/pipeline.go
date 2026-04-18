@@ -34,6 +34,7 @@ type Pipeline struct {
 	tableFlushLSN map[string]pglogrepl.LSN
 
 	writer        *iceberg.Writer
+	metaQuerier   *wal.MetadataQuerier // for column default lookups on schema change
 	flushInterval time.Duration
 	logger        *slog.Logger
 }
@@ -51,6 +52,7 @@ func New(
 	tableFlushLSN map[string]pglogrepl.LSN,
 	writer *iceberg.Writer,
 	flushInterval time.Duration,
+	metaQuerier *wal.MetadataQuerier,
 ) *Pipeline {
 	exclude := make(map[string]bool)
 	for _, t := range excludeTables {
@@ -66,6 +68,7 @@ func New(
 		state:         stateStore,
 		tableFlushLSN: tableFlushLSN,
 		writer:        writer,
+		metaQuerier:   metaQuerier,
 		flushInterval: flushInterval,
 		logger:        logger,
 	}
@@ -258,6 +261,28 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				key := fmt.Sprintf("%s.%s", v.Namespace, v.Name)
 				if p.excludeTables[key] {
 					p.logger.Debug("excluding table", "table", key)
+					break
+				}
+				if len(v.Changes) > 0 {
+					p.logger.Info("schema change detected",
+						"table", key,
+						"changes", len(v.Changes),
+					)
+					// Look up defaults for ADD columns.
+					var defaults map[string]string
+					if p.metaQuerier != nil {
+						addCols := collectAddColumns(v.Changes)
+						if len(addCols) > 0 {
+							var err error
+							defaults, err = p.metaQuerier.GetColumnDefaults(ctx, v.Namespace, v.Name, addCols)
+							if err != nil {
+								p.logger.Warn("could not fetch column defaults", "table", key, "error", err)
+							}
+						}
+					}
+					if err := p.writer.HandleSchemaChange(ctx, v, defaults); err != nil {
+						return fmt.Errorf("schema evolution for %s: %w", key, err)
+					}
 				}
 
 			case *wal.InsertMessage:
@@ -396,4 +421,16 @@ func (p *Pipeline) sendStandby(ctx context.Context, receivedLSN pglogrepl.LSN) e
 		"pending_min_lsn", pendingMinLSN,
 	)
 	return nil
+}
+
+// collectAddColumns returns the names of columns being added from a list
+// of schema changes.
+func collectAddColumns(changes []wal.SchemaChange) []string {
+	var cols []string
+	for _, ch := range changes {
+		if ch.Type == wal.SchemaChangeAdd {
+			cols = append(cols, ch.Column)
+		}
+	}
+	return cols
 }

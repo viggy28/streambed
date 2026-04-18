@@ -33,3 +33,28 @@ func TestPgOIDToIcebergType(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateTypeWidening(t *testing.T) {
+	// Allowed widenings.
+	if err := ValidateTypeWidening(TypeInt, TypeLong); err != nil {
+		t.Errorf("int→long should be allowed: %v", err)
+	}
+	if err := ValidateTypeWidening(TypeFloat, TypeDouble); err != nil {
+		t.Errorf("float→double should be allowed: %v", err)
+	}
+	// Same type is always OK.
+	if err := ValidateTypeWidening(TypeString, TypeString); err != nil {
+		t.Errorf("string→string should be allowed: %v", err)
+	}
+
+	// Incompatible changes should fail.
+	if err := ValidateTypeWidening(TypeLong, TypeInt); err == nil {
+		t.Error("long→int should be rejected")
+	}
+	if err := ValidateTypeWidening(TypeString, TypeInt); err == nil {
+		t.Error("string→int should be rejected")
+	}
+	if err := ValidateTypeWidening(TypeInt, TypeBoolean); err == nil {
+		t.Error("int→boolean should be rejected")
+	}
+}
