@@ -10,10 +10,11 @@ products — see [caveats](#caveats) below.
 - [initial-load.md](initial-load.md) — INSERT throughput when draining an
   accumulated WAL backlog (initial-load / backfill scenario). Varies flush
   config and transaction shape.
+- [update-shape.md](update-shape.md) — UPDATE throughput by transaction
+  shape. Exercises the writer's copy-on-write merge path.
 
 Planned:
 - `steady-state.md` — sustained INSERT rate under continuous load.
-- `cow-updates.md` — UPDATE/DELETE throughput via copy-on-write merge.
 
 ## Methodology
 
