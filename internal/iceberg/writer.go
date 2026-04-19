@@ -473,6 +473,10 @@ func (w *Writer) flush(ctx context.Context, key string) error {
 	if dataFile != nil {
 		dataBytes = dataFile.FileSize
 	}
+	// NOTE: test/integration/throughput_test.go taps this log line to measure
+	// throughput. If you change the message string ("flush completed") or the
+	// attribute keys ("rows", "deletes", "data_bytes", "duration_ms"), update
+	// the flushTracker handler in throughput_test.go.
 	w.logger.Info("flush completed",
 		"schema", buf.Schema,
 		"table", buf.Table,
