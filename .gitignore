@@ -1,6 +1,8 @@
 specs/*
 cmd/streambed/streambed
 streambed
+/simtest
+simtest-logs/
 .claude
 
 # Hugo site

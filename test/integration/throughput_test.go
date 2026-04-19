@@ -551,3 +551,164 @@ func TestInsertThroughputByShape(t *testing.T) {
 		}
 	}
 }
+
+// updateBenchRows updates all count rows in tableName by primary key.
+// txnSize controls transaction shape: 0 = one UPDATE statement touching all rows
+// (one txn); >0 = commits every txnSize rows. Each updated row emits one UPDATE
+// event in the WAL, which drives the writer's copy-on-write merge path.
+func updateBenchRows(t *testing.T, tableName string, count, txnSize int) time.Duration {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgconn.Connect(ctx, pgConnStr())
+	if err != nil {
+		t.Fatalf("connect for bench update: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	start := time.Now()
+
+	if txnSize <= 0 {
+		// All rows in one transaction, single statement. Simplest shape for
+		// the writer: 1M UPDATE events in a single COMMIT.
+		r := conn.Exec(ctx, "BEGIN")
+		if _, err := r.ReadAll(); err != nil {
+			t.Fatalf("BEGIN: %v", err)
+		}
+		sql := fmt.Sprintf("UPDATE %s SET name = name || '_u', value = value + 1.0 WHERE id <= %d", tableName, count)
+		r = conn.Exec(ctx, sql)
+		if _, err := r.ReadAll(); err != nil {
+			t.Fatalf("UPDATE all: %v", err)
+		}
+		r = conn.Exec(ctx, "COMMIT")
+		if _, err := r.ReadAll(); err != nil {
+			t.Fatalf("COMMIT: %v", err)
+		}
+	} else {
+		// count/txnSize transactions, each updating a contiguous id range.
+		for i := 0; i < count; i += txnSize {
+			size := txnSize
+			if i+size > count {
+				size = count - i
+			}
+			lo := i + 1 // SERIAL starts at 1
+			hi := i + size
+			var sb strings.Builder
+			sb.WriteString("BEGIN; ")
+			sb.WriteString(fmt.Sprintf("UPDATE %s SET name = name || '_u', value = value + 1.0 WHERE id BETWEEN %d AND %d",
+				tableName, lo, hi))
+			sb.WriteString("; COMMIT")
+			r := conn.Exec(ctx, sb.String())
+			if _, err := r.ReadAll(); err != nil {
+				t.Fatalf("txn at row %d: %v", i, err)
+			}
+		}
+	}
+	return time.Since(start)
+}
+
+// TestUpdateThroughputByShape measures UPDATE rows-per-second by transaction
+// shape. Unlike TestInsertThroughputByShape, each flush here exercises the
+// writer's copy-on-write merge path: read existing Parquet, filter deleted
+// rows, dedup new rows by key, rewrite combined result. The CoW cost is the
+// headline reason UPDATE throughput is materially lower than INSERT at the
+// same WAL volume.
+//
+// Protocol for each shape:
+//  1. Bulk-insert rowCount baseline rows (single txn, fastest shape).
+//  2. Drain the INSERT backlog — setup cost, NOT measured.
+//  3. UPDATE every row once, partitioned into transactions per shape.
+//  4. Drain the UPDATE backlog — this is the measured phase.
+func TestUpdateThroughputByShape(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping update shape benchmark in short mode")
+	}
+	skipIfNotAvailable(t)
+
+	const rowCount = 1_000_000
+	cfg := benchConfig{Name: "optimized", FlushRows: 5000, FlushInterval: 1 * time.Second}
+
+	type shapeResult struct {
+		Shape        string
+		TxnSize      int
+		UpdateTime   time.Duration
+		SyncDuration time.Duration
+		RPS          float64
+		Flushes      int
+		AvgFlushMs   float64
+		P99FlushMs   int64
+	}
+	var results []shapeResult
+
+	for _, shape := range benchShapes {
+		t.Run(shape.Name, func(t *testing.T) {
+			ctx := context.Background()
+
+			cleanup(t)
+			clearS3Prefix(t)
+			setupNamedTable(t, "bench_throughput")
+			createSlotAndPublication(t)
+
+			// Phase 1: insert baseline rows (one txn — fastest shape).
+			t.Logf("inserting baseline %d rows...", rowCount)
+			if d := insertBenchRows(t, "bench_throughput", rowCount, 0); d > 0 {
+				t.Logf("baseline insert completed in %v", d)
+			}
+
+			// Phase 2: drain the INSERT backlog. NOT measured — setup cost.
+			t.Logf("draining INSERT backlog (setup, not measured)...")
+			if _, err := runSyncBench(t, ctx, rowCount, cfg.FlushRows, cfg.FlushInterval, 10*time.Minute); err != nil {
+				t.Fatalf("baseline sync failed: %v", err)
+			}
+
+			// Phase 3: UPDATE every row once, shape-partitioned.
+			t.Logf("updating %d rows, shape=%s (txnSize=%d)...",
+				rowCount, shape.Name, shape.TxnSize)
+			updateTime := updateBenchRows(t, "bench_throughput", rowCount, shape.TxnSize)
+			t.Logf("update completed in %v", updateTime)
+
+			// Phase 4: drain the UPDATE backlog. THIS is the measurement.
+			tracker, err := runSyncBench(t, ctx, rowCount, cfg.FlushRows, cfg.FlushInterval, 10*time.Minute)
+			if err != nil {
+				t.Fatalf("update sync failed: %v", err)
+			}
+
+			rows, flushes, syncDur, avgMs, p99Ms, _ := tracker.snapshot()
+			if flushes == 0 {
+				t.Fatal("no flush events captured")
+			}
+			rps := float64(rows) / syncDur.Seconds()
+
+			results = append(results, shapeResult{
+				Shape:        shape.Name,
+				TxnSize:      shape.TxnSize,
+				UpdateTime:   updateTime,
+				SyncDuration: syncDur,
+				RPS:          rps,
+				Flushes:      flushes,
+				AvgFlushMs:   avgMs,
+				P99FlushMs:   p99Ms,
+			})
+
+			t.Logf("result: shape=%s %d updates in %v (%.0f RPS, %d flushes)",
+				shape.Name, rows, syncDur.Round(time.Millisecond), rps, flushes)
+
+			execSQL(t, "DROP TABLE IF EXISTS bench_throughput")
+			cleanup(t)
+		})
+	}
+
+	if len(results) > 0 {
+		t.Logf("\n=== Streambed UPDATE Throughput by Transaction Shape (rows=%d, config=%s) ===",
+			rowCount, cfg.Name)
+		t.Logf("%-7s | %8s | %11s | %10s | %7s | %8s | %10s | %9s",
+			"Shape", "TxnSize", "PG Update", "Sync", "RPS", "Flushes", "Avg Flush", "P99 Flush")
+		t.Logf("%s", strings.Repeat("-", 90))
+		for _, r := range results {
+			t.Logf("%-7s | %8d | %11v | %10v | %7.0f | %8d | %8.1fms | %7dms",
+				r.Shape, r.TxnSize,
+				r.UpdateTime.Round(time.Millisecond),
+				r.SyncDuration.Round(time.Millisecond),
+				r.RPS, r.Flushes, r.AvgFlushMs, r.P99FlushMs)
+		}
+	}
+}
