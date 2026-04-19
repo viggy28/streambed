@@ -392,19 +392,29 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 }
 
+// computeAck returns the safe ack LSN given the highest received WAL
+// position and the smallest pending (unflushed) buffer LSN. When
+// pendingMinLSN is 0 (all buffers empty) we can ack up to receivedLSN.
+// Otherwise we hold back to pendingMinLSN-1 so the slot won't advance
+// past data we haven't durably written to Iceberg yet.
+func computeAck(receivedLSN, pendingMinLSN pglogrepl.LSN) pglogrepl.LSN {
+	if pendingMinLSN == 0 {
+		return receivedLSN
+	}
+	hold := pendingMinLSN - 1
+	if hold < receivedLSN {
+		return hold
+	}
+	return receivedLSN
+}
+
 // sendStandby computes the safe ack position and sends a standby status
 // update to Postgres. The ack is held back to the oldest unflushed
 // buffer's FirstLSN-1 so the slot won't advance past data we haven't
 // durably written to Iceberg yet.
 func (p *Pipeline) sendStandby(ctx context.Context, receivedLSN pglogrepl.LSN) error {
-	ack := receivedLSN
 	pendingMinLSN := p.writer.ComputePendingMinLSN()
-	if pendingMinLSN != 0 {
-		hold := pendingMinLSN - 1
-		if hold < ack {
-			ack = hold
-		}
-	}
+	ack := computeAck(receivedLSN, pendingMinLSN)
 	err := pglogrepl.SendStandbyStatusUpdate(ctx, p.conn,
 		pglogrepl.StandbyStatusUpdate{
 			WALWritePosition: ack,
