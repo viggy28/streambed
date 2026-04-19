@@ -1,6 +1,7 @@
 specs/*
 cmd/streambed/streambed
 streambed
+.claude
 
 # Hugo site
 site/public/
