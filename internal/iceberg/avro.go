@@ -152,7 +152,8 @@ func writeEqDeleteManifestAvro(
 
 	buf := new(bytes.Buffer)
 	cnt := &countingWriter{w: buf}
-	w, err := ice.NewManifestWriter(2, cnt, *ice.UnpartitionedSpec, schema, snapshotID)
+	w, err := ice.NewManifestWriter(2, cnt, *ice.UnpartitionedSpec, schema, snapshotID,
+		ice.WithManifestWriterContent(ice.ManifestContentDeletes))
 	if err != nil {
 		return nil, nil, fmt.Errorf("create manifest writer: %w", err)
 	}

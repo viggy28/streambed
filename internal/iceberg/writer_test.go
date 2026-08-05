@@ -1,14 +1,19 @@
 package iceberg
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	ice "github.com/apache/iceberg-go"
 	"github.com/jackc/pglogrepl"
 	pqbuilder "github.com/viggy28/streambed/internal/parquet"
 	"github.com/viggy28/streambed/internal/state"
@@ -125,10 +130,10 @@ func TestComputePendingMinLSN_AfterPartialFlush(t *testing.T) {
 func TestComputePendingMinLSN_MixedEmptyNonEmpty(t *testing.T) {
 	w := &Writer{
 		buffers: map[string]*tableBuffer{
-			"public.orders":   {FirstLSN: 0},                     // empty
-			"public.users":    {FirstLSN: pglogrepl.LSN(999)},    // non-empty
-			"public.products": {FirstLSN: 0},                     // empty
-			"public.logs":     {FirstLSN: pglogrepl.LSN(888)},    // non-empty
+			"public.orders":   {FirstLSN: 0},                  // empty
+			"public.users":    {FirstLSN: pglogrepl.LSN(999)}, // non-empty
+			"public.products": {FirstLSN: 0},                  // empty
+			"public.logs":     {FirstLSN: pglogrepl.LSN(888)}, // non-empty
 		},
 	}
 
@@ -158,6 +163,38 @@ func testStateStore(t *testing.T) *state.Store {
 }
 
 // testWriter creates a Writer backed by MemS3Client and a temp state store.
+type countingStorage struct {
+	inner           storage.ObjectStorage
+	parquetGets     int
+	parquetGetBytes int64
+	puts            int
+	putBytes        int64
+}
+
+func (c *countingStorage) PutObject(ctx context.Context, key string, data []byte, contentType string) error {
+	c.puts++
+	c.putBytes += int64(len(data))
+	return c.inner.PutObject(ctx, key, data, contentType)
+}
+func (c *countingStorage) GetObject(ctx context.Context, key string) ([]byte, error) {
+	data, err := c.inner.GetObject(ctx, key)
+	if err == nil && strings.HasSuffix(key, ".parquet") {
+		c.parquetGets++
+		c.parquetGetBytes += int64(len(data))
+	}
+	return data, err
+}
+func (c *countingStorage) HeadObject(ctx context.Context, key string) (bool, error) {
+	return c.inner.HeadObject(ctx, key)
+}
+func (c *countingStorage) ListPrefix(ctx context.Context, prefix string) ([]string, error) {
+	return c.inner.ListPrefix(ctx, prefix)
+}
+func (c *countingStorage) DeleteObjects(ctx context.Context, keys []string) error {
+	return c.inner.DeleteObjects(ctx, keys)
+}
+func (c *countingStorage) Bucket() string { return c.inner.Bucket() }
+
 func testWriter(t *testing.T) (*Writer, *storage.MemS3Client) {
 	t.Helper()
 	mem := storage.NewMemS3Client("test-bucket")
@@ -176,11 +213,11 @@ func testColumns() []wal.Column {
 
 func insertEvent(schema, table string, lsn pglogrepl.LSN, id, name string) wal.RowEvent {
 	return wal.RowEvent{
-		Schema:  schema,
-		Table:   table,
-		Columns: testColumns(),
+		Schema:     schema,
+		Table:      table,
+		Columns:    testColumns(),
 		KeyColumns: []int{0},
-		Op:      wal.OpInsert,
+		Op:         wal.OpInsert,
 		Values: []wal.ColumnValue{
 			{Name: "id", OID: 23, Value: []byte(id)},
 			{Name: "name", OID: 25, Value: []byte(name)},
@@ -312,6 +349,21 @@ func TestBufferUpdate(t *testing.T) {
 	// UPDATE should NOT set deletedKeys (only standalone DELETE does).
 	if len(buf.deletedKeys) > 0 {
 		t.Errorf("deletedKeys should be empty for UPDATE, got %d", len(buf.deletedKeys))
+	}
+}
+
+func TestBufferPrimaryKeyChangeSuppressesIntermediateReplacement(t *testing.T) {
+	w, _ := testWriter(t)
+	w.buffer(updateEvent("public", "t1", 100, "1", "2", "v2"))
+	w.buffer(updateEvent("public", "t1", 200, "2", "3", "v3"))
+	buf := w.buffers["public.t1"]
+	rows := dedupRows(buf.Rows, buf.KeyColumns, buf.deletedKeys)
+	if len(rows) != 1 || string(rows[0][0].Data) != "3" {
+		t.Fatalf("replacement rows=%v, want only final key 3", rows)
+	}
+	deletes := dedupValueRows(buf.Deletes)
+	if len(deletes) != 2 {
+		t.Fatalf("delete keys=%d, want old keys 1 and 2", len(deletes))
 	}
 }
 
@@ -464,6 +516,326 @@ func TestFlushCOW(t *testing.T) {
 	if names["alice"] {
 		t.Error("alice should have been deleted")
 	}
+}
+
+func TestFlushMORWritesEqualityDeletesWithoutReadingData(t *testing.T) {
+	for _, tc := range []struct {
+		mode          MutationMode
+		wantDataReads bool
+		wantDataFiles int
+	}{
+		{mode: MutationModeCOW, wantDataReads: true, wantDataFiles: 1},
+		{mode: MutationModeMOR, wantDataReads: false, wantDataFiles: 2},
+	} {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			mem := storage.NewMemS3Client("test-bucket")
+			counted := &countingStorage{inner: mem}
+			catalog := NewCatalog(counted, "test-bucket", "test-prefix")
+			w := NewWriter(catalog, counted, testStateStore(t), "test_slot", 10000, 2*time.Second,
+				testLogger(), WithMutationMode(tc.mode))
+			ctx := context.Background()
+
+			w.buffer(insertEvent("public", "t1", 100, "1", "alice"))
+			w.buffer(insertEvent("public", "t1", 200, "2", "bob"))
+			if err := w.flush(ctx, "public.t1"); err != nil {
+				t.Fatalf("initial flush: %v", err)
+			}
+			counted.parquetGets = 0
+			counted.parquetGetBytes = 0
+
+			w.buffer(updateEvent("public", "t1", 300, "2", "2", "bob_v2"))
+			if err := w.flush(ctx, "public.t1"); err != nil {
+				t.Fatalf("mutation flush: %v", err)
+			}
+
+			if got := counted.parquetGets > 0; got != tc.wantDataReads {
+				t.Fatalf("read existing parquet=%v (gets=%d), want %v", got, counted.parquetGets, tc.wantDataReads)
+			}
+			paths, err := catalog.GetDataFilePaths(ctx, "public", "t1")
+			if err != nil {
+				t.Fatalf("GetDataFilePaths: %v", err)
+			}
+			if len(paths) != tc.wantDataFiles {
+				t.Fatalf("current data files=%d, want %d", len(paths), tc.wantDataFiles)
+			}
+
+			if tc.mode == MutationModeMOR {
+				keys, err := mem.ListPrefix(ctx, "test-prefix/public/t1/data/")
+				if err != nil {
+					t.Fatal(err)
+				}
+				var deleteKey string
+				for _, key := range keys {
+					if strings.HasSuffix(key, "-delete.parquet") {
+						deleteKey = key
+					}
+				}
+				if deleteKey == "" {
+					t.Fatal("MOR flush did not write an equality-delete parquet file")
+				}
+				deleteData, err := mem.GetObject(ctx, deleteKey)
+				if err != nil {
+					t.Fatal(err)
+				}
+				rows, err := pqbuilder.ReadRows(deleteData, []pqbuilder.ColumnDef{{Name: "id", OID: 23, FieldID: 1}})
+				if err != nil {
+					t.Fatalf("read equality deletes: %v", err)
+				}
+				if len(rows) != 1 || string(rows[0][0].Data) != "2" {
+					t.Fatalf("delete rows=%v, want key 2", rows)
+				}
+			}
+		})
+	}
+}
+
+func TestMORSameSnapshotSequenceSemantics(t *testing.T) {
+	mem := storage.NewMemS3Client("test-bucket")
+	catalog := NewCatalog(mem, "test-bucket", "test-prefix")
+	w := NewWriter(catalog, mem, testStateStore(t), "test_slot", 10000, 2*time.Second,
+		testLogger(), WithMutationMode(MutationModeMOR))
+	ctx := context.Background()
+	w.buffer(insertEvent("public", "t1", 100, "1", "old"))
+	if err := w.flush(ctx, "public.t1"); err != nil {
+		t.Fatal(err)
+	}
+	w.buffer(updateEvent("public", "t1", 200, "1", "1", "new"))
+	if err := w.flush(ctx, "public.t1"); err != nil {
+		t.Fatal(err)
+	}
+
+	hint, _ := mem.GetObject(ctx, "test-prefix/public/t1/metadata/version-hint.text")
+	metaData, err := mem.GetObject(ctx, fmt.Sprintf("test-prefix/public/t1/metadata/v%s.metadata.json", hint))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta tableMetadata
+	if err := json.Unmarshal(metaData, &meta); err != nil {
+		t.Fatal(err)
+	}
+	var manifestList string
+	for _, snap := range meta.Snapshots {
+		if snap.SnapshotID == meta.CurrentSnapshotID {
+			manifestList = snap.ManifestList
+			if snap.Summary["added-equality-deletes"] != "1" {
+				t.Fatalf("snapshot summary missing equality-delete count: %v", snap.Summary)
+			}
+			if _, exists := snap.Summary["total-records"]; exists {
+				t.Fatalf("MOR snapshot published unknowable total-records: %v", snap.Summary)
+			}
+		}
+	}
+	listData, err := mem.GetObject(ctx, s3KeyFromURI(manifestList))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifests, err := readManifestListAvro(listData)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var oldDataSeq, replacementSeq, deleteSeq int64
+	for _, manifest := range manifests {
+		manifestData, err := mem.GetObject(ctx, s3KeyFromURI(manifest.FilePath()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries, err := ice.ReadManifest(manifest, bytes.NewReader(manifestData), false)
+		if err != nil {
+			t.Fatalf("read manifest %s: %v", manifest.FilePath(), err)
+		}
+		for _, entry := range entries {
+			switch entry.DataFile().ContentType() {
+			case ice.EntryContentEqDeletes:
+				deleteSeq = entry.SequenceNum()
+			case ice.EntryContentData:
+				if entry.SequenceNum() > replacementSeq {
+					oldDataSeq = replacementSeq
+					replacementSeq = entry.SequenceNum()
+				} else {
+					oldDataSeq = entry.SequenceNum()
+				}
+			}
+		}
+	}
+	if oldDataSeq == 0 || replacementSeq == 0 || deleteSeq == 0 {
+		t.Fatalf("missing sequences: old=%d replacement=%d delete=%d", oldDataSeq, replacementSeq, deleteSeq)
+	}
+	if deleteSeq != replacementSeq {
+		t.Fatalf("delete sequence=%d, replacement sequence=%d; same-snapshot files must match", deleteSeq, replacementSeq)
+	}
+	if oldDataSeq >= deleteSeq {
+		t.Fatalf("old data sequence=%d must be lower than delete sequence=%d", oldDataSeq, deleteSeq)
+	}
+}
+
+func TestDeleteOnlyNonExistentTableClearsPendingState(t *testing.T) {
+	for _, mode := range []MutationMode{MutationModeCOW, MutationModeMOR} {
+		t.Run(string(mode), func(t *testing.T) {
+			mem := storage.NewMemS3Client("test-bucket")
+			w := NewWriter(NewCatalog(mem, "test-bucket", "test-prefix"), mem, testStateStore(t), "test_slot", 10000, 2*time.Second,
+				testLogger(), WithMutationMode(mode))
+			w.buffer(deleteEvent("public", "missing", 200, "1"))
+			if got := w.ComputePendingMinLSN(); got == 0 {
+				t.Fatal("delete should make buffer pending before flush")
+			}
+			if err := w.flush(context.Background(), "public.missing"); err != nil {
+				t.Fatal(err)
+			}
+			buf := w.buffers["public.missing"]
+			if len(buf.Deletes) != 0 || buf.deletedKeys != nil || buf.FirstLSN != 0 || w.ComputePendingMinLSN() != 0 {
+				t.Fatalf("pending state not cleared: deletes=%d deletedKeys=%v firstLSN=%s", len(buf.Deletes), buf.deletedKeys, buf.FirstLSN)
+			}
+		})
+	}
+}
+
+func TestFlushMORDeleteOnlyAndRepeatedKeys(t *testing.T) {
+	mem := storage.NewMemS3Client("test-bucket")
+	catalog := NewCatalog(mem, "test-bucket", "test-prefix")
+	w := NewWriter(catalog, mem, testStateStore(t), "test_slot", 10000, 2*time.Second,
+		testLogger(), WithMutationMode(MutationModeMOR))
+	ctx := context.Background()
+
+	w.buffer(insertEvent("public", "t1", 100, "1", "alice"))
+	if err := w.flush(ctx, "public.t1"); err != nil {
+		t.Fatal(err)
+	}
+	// Repeated deletes are deduplicated into one equality-delete key and a
+	// delete-only snapshot must not add a data file.
+	w.buffer(deleteEvent("public", "t1", 200, "1"))
+	w.buffer(deleteEvent("public", "t1", 300, "1"))
+	if err := w.flush(ctx, "public.t1"); err != nil {
+		t.Fatalf("delete-only flush: %v", err)
+	}
+	paths, err := catalog.GetDataFilePaths(ctx, "public", "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("delete-only MOR changed data file count to %d, want 1", len(paths))
+	}
+
+	keys, _ := mem.ListPrefix(ctx, "test-prefix/public/t1/data/")
+	var deleteFiles []string
+	for _, key := range keys {
+		if strings.HasSuffix(key, "-delete.parquet") {
+			deleteFiles = append(deleteFiles, key)
+		}
+	}
+	if len(deleteFiles) != 1 {
+		t.Fatalf("delete files=%d, want 1", len(deleteFiles))
+	}
+	data, err := mem.GetObject(ctx, deleteFiles[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := pqbuilder.ReadRows(data, []pqbuilder.ColumnDef{{Name: "id", OID: 23, FieldID: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("deduplicated delete rows=%d, want 1", len(rows))
+	}
+}
+
+func TestCOWRefusesTableWithMORDeletes(t *testing.T) {
+	mem := storage.NewMemS3Client("test-bucket")
+	catalog := NewCatalog(mem, "test-bucket", "test-prefix")
+	store := testStateStore(t)
+	mor := NewWriter(catalog, mem, store, "test_slot", 10000, 2*time.Second,
+		testLogger(), WithMutationMode(MutationModeMOR))
+	ctx := context.Background()
+	mor.buffer(insertEvent("public", "t1", 100, "1", "alice"))
+	if err := mor.flush(ctx, "public.t1"); err != nil {
+		t.Fatal(err)
+	}
+	mor.buffer(deleteEvent("public", "t1", 200, "1"))
+	if err := mor.flush(ctx, "public.t1"); err != nil {
+		t.Fatal(err)
+	}
+
+	cow := NewWriter(catalog, mem, store, "test_slot", 10000, 2*time.Second, testLogger())
+	cow.buffer(updateEvent("public", "t1", 300, "1", "1", "resurrected"))
+	err := cow.flush(ctx, "public.t1")
+	if err == nil || !strings.Contains(err.Error(), "current snapshot has equality deletes") {
+		t.Fatalf("COW after MOR error=%v, want safe refusal", err)
+	}
+}
+
+func TestMutationModeStartupPreflight(t *testing.T) {
+	mem := storage.NewMemS3Client("test-bucket")
+	catalog := NewCatalog(mem, "test-bucket", "test-prefix")
+	store := testStateStore(t)
+	ctx := context.Background()
+
+	mor := NewWriter(catalog, mem, store, "test_slot", 10000, 2*time.Second,
+		testLogger(), WithMutationMode(MutationModeMOR))
+	mor.buffer(insertEvent("public", "clean", 100, "1", "alice"))
+	if err := mor.flush(ctx, "public.clean"); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.ValidateMutationMode(ctx, MutationModeCOW); err != nil {
+		t.Fatalf("COW preflight rejected append-only table: %v", err)
+	}
+
+	mor.buffer(deleteEvent("public", "clean", 200, "1"))
+	if err := mor.flush(ctx, "public.clean"); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.ValidateMutationMode(ctx, MutationModeMOR); err != nil {
+		t.Fatalf("MOR preflight rejected MOR table: %v", err)
+	}
+	err := catalog.ValidateMutationMode(ctx, MutationModeCOW)
+	if err == nil {
+		t.Fatal("COW preflight accepted table with active equality deletes")
+	}
+	if got := err.Error(); !strings.Contains(got, "public.clean") || !strings.Contains(got, "--mutation-mode=mor") {
+		t.Fatalf("COW preflight error lacks table/remediation: %v", err)
+	}
+}
+
+func TestFlushMORCompositeKeyFieldIDs(t *testing.T) {
+	mem := storage.NewMemS3Client("test-bucket")
+	catalog := NewCatalog(mem, "test-bucket", "test-prefix")
+	w := NewWriter(catalog, mem, testStateStore(t), "test_slot", 10000, 2*time.Second,
+		testLogger(), WithMutationMode(MutationModeMOR))
+	ctx := context.Background()
+	cols := []wal.Column{{Name: "tenant_id", OID: 23, IsKey: true}, {Name: "name", OID: 25}, {Name: "item_id", OID: 20, IsKey: true}}
+
+	w.buffer(wal.RowEvent{Schema: "public", Table: "items", Columns: cols, KeyColumns: []int{0, 2}, Op: wal.OpInsert,
+		Values: []wal.ColumnValue{{Value: []byte("7")}, {Value: []byte("old")}, {Value: []byte("99")}}, WALStartLSN: 100})
+	if err := w.flush(ctx, "public.items"); err != nil {
+		t.Fatal(err)
+	}
+	w.buffer(wal.RowEvent{Schema: "public", Table: "items", Columns: cols, KeyColumns: []int{0, 2}, Op: wal.OpDelete,
+		OldKey: []wal.ColumnValue{{Value: []byte("7")}, {Value: []byte("99")}}, WALStartLSN: 200})
+	if err := w.flush(ctx, "public.items"); err != nil {
+		t.Fatal(err)
+	}
+
+	keys, _ := mem.ListPrefix(ctx, "test-prefix/public/items/data/")
+	for _, key := range keys {
+		if !strings.HasSuffix(key, "-delete.parquet") {
+			continue
+		}
+		data, err := mem.GetObject(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows, err := pqbuilder.ReadRows(data, []pqbuilder.ColumnDef{
+			{Name: "tenant_id", OID: 23, FieldID: 1},
+			{Name: "item_id", OID: 20, FieldID: 3},
+		})
+		if err != nil {
+			t.Fatalf("read composite delete: %v", err)
+		}
+		if len(rows) != 1 || string(rows[0][0].Data) != "7" || string(rows[0][1].Data) != "99" {
+			t.Fatalf("unexpected composite delete rows: %v", rows)
+		}
+		return
+	}
+	t.Fatal("composite equality-delete file not found")
 }
 
 // TestFlushOnS3Failure verifies that when PutObject fails, the error

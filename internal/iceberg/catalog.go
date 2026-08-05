@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	ice "github.com/apache/iceberg-go"
@@ -433,6 +435,88 @@ func (c *Catalog) GetDataFilePaths(ctx context.Context, schema, table string) ([
 	return paths, nil
 }
 
+// ValidateMutationMode fails fast when COW is selected but an existing table
+// has active delete manifests. COW does not apply those deletes while reading
+// existing data and could otherwise resurrect rows on the first mutation.
+func (c *Catalog) ValidateMutationMode(ctx context.Context, mode MutationMode) error {
+	if mode != MutationModeCOW {
+		return nil
+	}
+
+	keys, err := c.storage.ListPrefix(ctx, c.prefix)
+	if err != nil {
+		return fmt.Errorf("discover Iceberg tables for mutation-mode preflight: %w", err)
+	}
+
+	prefix := strings.Trim(path.Clean(c.prefix), "/")
+	var incompatible []string
+	for _, key := range keys {
+		cleanKey := strings.TrimPrefix(path.Clean(key), "/")
+		rel := cleanKey
+		if prefix != "." && prefix != "" {
+			var ok bool
+			rel, ok = strings.CutPrefix(cleanKey, prefix+"/")
+			if !ok {
+				continue
+			}
+		}
+		parts := strings.Split(rel, "/")
+		if len(parts) != 4 || parts[2] != "metadata" || parts[3] != "version-hint.text" {
+			continue
+		}
+		hasDeletes, err := c.HasEqualityDeleteFiles(ctx, parts[0], parts[1])
+		if err != nil {
+			return fmt.Errorf("inspect %s.%s for mutation-mode preflight: %w", parts[0], parts[1], err)
+		}
+		if hasDeletes {
+			incompatible = append(incompatible, parts[0]+"."+parts[1])
+		}
+	}
+	if len(incompatible) == 0 {
+		return nil
+	}
+	sort.Strings(incompatible)
+	return fmt.Errorf("cannot start with mutation-mode=cow: active equality deletes exist for %s; restart with --mutation-mode=mor", strings.Join(incompatible, ", "))
+}
+
+// HasEqualityDeleteFiles reports whether the current snapshot references any
+// equality/position delete manifests. The current COW reader cannot apply
+// those deletes, so switching an MOR table back to COW must fail safely.
+func (c *Catalog) HasEqualityDeleteFiles(ctx context.Context, schema, table string) (bool, error) {
+	basePath := c.tablePath(schema, table)
+	hintData, err := c.storage.GetObject(ctx, path.Join(basePath, "metadata", "version-hint.text"))
+	if err != nil {
+		return false, fmt.Errorf("read version-hint: %w", err)
+	}
+	version, err := strconv.Atoi(string(hintData))
+	if err != nil {
+		return false, fmt.Errorf("parse version hint: %w", err)
+	}
+	metaData, err := c.storage.GetObject(ctx, path.Join(basePath, "metadata", fmt.Sprintf("v%d.metadata.json", version)))
+	if err != nil {
+		return false, fmt.Errorf("read metadata: %w", err)
+	}
+	var metadata tableMetadata
+	if err := json.Unmarshal(metaData, &metadata); err != nil {
+		return false, fmt.Errorf("parse metadata: %w", err)
+	}
+	for _, snap := range metadata.Snapshots {
+		if snap.SnapshotID != metadata.CurrentSnapshotID {
+			continue
+		}
+		manifests, err := c.readManifestList(ctx, snap.ManifestList)
+		if err != nil {
+			return false, err
+		}
+		for _, manifest := range manifests {
+			if manifest.ManifestContent() == ice.ManifestContentDeletes {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 // CommitSnapshot appends a new data file via a new Iceberg snapshot.
 // This is a thin wrapper around CommitChangeset for append-only callers
 // (see resync and initial backfill paths).
@@ -503,7 +587,10 @@ func (c *Catalog) CommitChangeset(
 		return fmt.Errorf("parse metadata: %w", err)
 	}
 
-	snapID := time.Now().UnixMilli()
+	// Snapshot IDs must be unique even when multiple flushes commit within the
+	// same millisecond (common in tests and local object stores). Timestamps in
+	// metadata remain milliseconds; the ID itself has no time-unit semantics.
+	snapID := time.Now().UnixNano()
 	seqNum := metadata.LastSequenceNumber + 1
 
 	// Build iceberg-go schema from metadata
@@ -631,11 +718,15 @@ func (c *Catalog) CommitChangeset(
 		summary["streambed.last_flush_lsn"] = flushLSN
 	}
 	if replace {
-		// Overwrite: total-records is just what's in this snapshot.
+		// Overwrite: total-records is exactly the replacement file's rows.
 		summary["total-records"] = strconv.FormatInt(addedRows, 10)
-	} else {
-		// Append: accumulate over all snapshots.
-		summary["total-records"] = strconv.FormatInt(totalRecords(metadata.Snapshots)+addedRows, 10)
+	} else if eqDel == nil && !hasEqualityDeletes(metadata.Snapshots) {
+		// Continue from the current snapshot's exact total. Summing historical
+		// added-records is wrong after an overwrite because replaced rows are
+		// still present in snapshot history.
+		if currentTotal, exact := currentSnapshotTotalRecords(metadata); exact {
+			summary["total-records"] = strconv.FormatInt(currentTotal+addedRows, 10)
+		}
 	}
 	_ = addedDeleteRows
 
@@ -841,6 +932,33 @@ func icebergTypeStringToPrimitive(t string) ice.Type {
 	default:
 		return ice.PrimitiveTypes.String
 	}
+}
+
+func hasEqualityDeletes(snapshots []snapshot) bool {
+	for _, s := range snapshots {
+		if v, ok := s.Summary["added-equality-deletes"]; ok && v != "0" {
+			return true
+		}
+	}
+	return false
+}
+
+func currentSnapshotTotalRecords(metadata tableMetadata) (int64, bool) {
+	if metadata.CurrentSnapshotID <= 0 {
+		return 0, true
+	}
+	for _, snap := range metadata.Snapshots {
+		if snap.SnapshotID != metadata.CurrentSnapshotID {
+			continue
+		}
+		value, ok := snap.Summary["total-records"]
+		if !ok {
+			return 0, false
+		}
+		total, err := strconv.ParseInt(value, 10, 64)
+		return total, err == nil
+	}
+	return 0, false
 }
 
 func totalRecords(snapshots []snapshot) int64 {

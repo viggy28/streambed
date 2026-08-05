@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	duckdb "github.com/marcboeker/go-duckdb"
+	duckdb "github.com/duckdb/duckdb-go/v2"
 
 	wire "github.com/jeroenrinzema/psql-wire"
 	"github.com/viggy28/streambed/internal/storage"

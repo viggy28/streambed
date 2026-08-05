@@ -19,10 +19,10 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	_ "github.com/duckdb/duckdb-go/v2"
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/marcboeker/go-duckdb"
 	pqgo "github.com/parquet-go/parquet-go"
 	"github.com/viggy28/streambed/internal/iceberg"
 	"github.com/viggy28/streambed/internal/pipeline"
@@ -147,9 +147,15 @@ func insertRows(t *testing.T, count int) {
 	insertNamedRows(t, "test_events", count)
 }
 
-// runSync runs the streambed sync pipeline for the given duration.
-// If statePath is empty, a temporary directory is used.
+// runSync runs the streambed sync pipeline in the default COW mode.
 func runSync(t *testing.T, ctx context.Context, duration time.Duration, statePath ...string) {
+	t.Helper()
+	runSyncWithMutationMode(t, ctx, duration, iceberg.MutationModeCOW, statePath...)
+}
+
+// runSyncWithMutationMode runs the pipeline with an explicit mutation mode.
+// If statePath is empty, a temporary directory is used.
+func runSyncWithMutationMode(t *testing.T, ctx context.Context, duration time.Duration, mode iceberg.MutationMode, statePath ...string) {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
@@ -219,7 +225,7 @@ func runSync(t *testing.T, ctx context.Context, duration time.Duration, statePat
 
 	// Initialize writer
 	writer := iceberg.NewWriter(catalog, s3Client, stateStore, slotName,
-		flushRows, 5*time.Second, logger)
+		flushRows, 5*time.Second, logger, iceberg.WithMutationMode(mode))
 
 	// Open metadata connection for schema evolution queries.
 	metaConn, err := pgx.Connect(ctx, pgConnStr())
@@ -1752,4 +1758,3 @@ func TestBulkIngestThroughput(t *testing.T) {
 
 	cleanup(t)
 }
-

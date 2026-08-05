@@ -187,17 +187,8 @@ func equalIntSlice(a, b []int) bool {
 func (d *Decoder) decodeTuple(rel *RelationMessage, tup *pglogrepl.TupleData) []ColumnValue {
 	row := make([]ColumnValue, len(tup.Columns))
 	for i, col := range tup.Columns {
-		cv := ColumnValue{
-			Name: rel.Columns[i].Name,
-			OID:  rel.Columns[i].OID,
-		}
-		switch col.DataType {
-		case 'n':
-			cv.IsNull = true
-		case 't':
-			cv.Value = col.Data
-		case 'u':
-			cv.IsUnchangedTOAST = true
+		cv := d.decodeColumn(rel.Columns[i], col)
+		if cv.IsUnchangedTOAST {
 			d.logger.Debug("unchanged TOAST marker",
 				"table", rel.Name,
 				"column", cv.Name,
@@ -206,6 +197,47 @@ func (d *Decoder) decodeTuple(rel *RelationMessage, tup *pglogrepl.TupleData) []
 		row[i] = cv
 	}
 	return row
+}
+
+func (d *Decoder) decodeColumn(column Column, value *pglogrepl.TupleDataColumn) ColumnValue {
+	cv := ColumnValue{Name: column.Name, OID: column.OID}
+	switch value.DataType {
+	case 'n':
+		cv.IsNull = true
+	case 't':
+		cv.Value = value.Data
+	case 'u':
+		cv.IsUnchangedTOAST = true
+	}
+	return cv
+}
+
+// decodeKeyTuple decodes a pgoutput 'K' tuple. PostgreSQL normally emits a
+// compact tuple containing only replica-identity columns, while some protocol
+// producers/versions expose a relation-width tuple with placeholders. Accept
+// both representations and always return keys in KeyColumnIndexes order.
+func (d *Decoder) decodeKeyTuple(rel *RelationMessage, tup *pglogrepl.TupleData) ([]ColumnValue, error) {
+	keys := make([]ColumnValue, len(rel.KeyColumnIndexes))
+	switch len(tup.Columns) {
+	case len(rel.KeyColumnIndexes):
+		for i, value := range tup.Columns {
+			idx := rel.KeyColumnIndexes[i]
+			if idx < 0 || idx >= len(rel.Columns) {
+				return nil, fmt.Errorf("key column index %d out of range for %s", idx, rel.Name)
+			}
+			keys[i] = d.decodeColumn(rel.Columns[idx], value)
+		}
+	case len(rel.Columns):
+		for i, idx := range rel.KeyColumnIndexes {
+			if idx < 0 || idx >= len(rel.Columns) {
+				return nil, fmt.Errorf("key column index %d out of range for %s", idx, rel.Name)
+			}
+			keys[i] = d.decodeColumn(rel.Columns[idx], tup.Columns[idx])
+		}
+	default:
+		return nil, fmt.Errorf("key tuple for %s has %d columns, want %d compact or %d relation-width", rel.Name, len(tup.Columns), len(rel.KeyColumnIndexes), len(rel.Columns))
+	}
+	return keys, nil
 }
 
 func (d *Decoder) decodeInsert(m *pglogrepl.InsertMessage) (*InsertMessage, error) {
@@ -254,18 +286,32 @@ func (d *Decoder) decodeUpdate(m *pglogrepl.UpdateMessage) (*UpdateMessage, erro
 	}
 
 	if m.OldTuple != nil {
-		oldFull := d.decodeTuple(rel, m.OldTuple)
-		oldKey = make([]ColumnValue, len(rel.KeyColumnIndexes))
-		for i, idx := range rel.KeyColumnIndexes {
-			oldKey[i] = oldFull[idx]
-		}
-		// Merge unchanged TOAST values from old tuple (REPLICA IDENTITY FULL).
-		if hasToast {
-			for i, cv := range newRow {
-				if cv.IsUnchangedTOAST && i < len(oldFull) {
-					newRow[i] = oldFull[i]
+		switch m.OldTupleType {
+		case pglogrepl.UpdateMessageTupleTypeKey:
+			var err error
+			oldKey, err = d.decodeKeyTuple(rel, m.OldTuple)
+			if err != nil {
+				return nil, err
+			}
+		case pglogrepl.UpdateMessageTupleTypeOld:
+			if len(m.OldTuple.Columns) != len(rel.Columns) {
+				return nil, fmt.Errorf("old tuple for %s has %d columns, want %d", rel.Name, len(m.OldTuple.Columns), len(rel.Columns))
+			}
+			oldFull := d.decodeTuple(rel, m.OldTuple)
+			oldKey = make([]ColumnValue, len(rel.KeyColumnIndexes))
+			for i, idx := range rel.KeyColumnIndexes {
+				oldKey[i] = oldFull[idx]
+			}
+			// Only an 'O' tuple contains non-key TOAST values.
+			if hasToast {
+				for i, cv := range newRow {
+					if cv.IsUnchangedTOAST {
+						newRow[i] = oldFull[i]
+					}
 				}
 			}
+		default:
+			return nil, fmt.Errorf("update for %s has old tuple with invalid type %q", rel.Name, m.OldTupleType)
 		}
 	} else {
 		// Key unchanged: derive from NEW tuple.
@@ -320,10 +366,25 @@ func (d *Decoder) decodeDelete(m *pglogrepl.DeleteMessage) (*DeleteMessage, erro
 		// No key available → caller will skip this event.
 		return &DeleteMessage{RelationID: m.RelationID}, nil
 	}
-	oldFull := d.decodeTuple(rel, m.OldTuple)
-	oldKey := make([]ColumnValue, len(rel.KeyColumnIndexes))
-	for i, idx := range rel.KeyColumnIndexes {
-		oldKey[i] = oldFull[idx]
+	var oldKey []ColumnValue
+	switch m.OldTupleType {
+	case pglogrepl.DeleteMessageTupleTypeKey:
+		var err error
+		oldKey, err = d.decodeKeyTuple(rel, m.OldTuple)
+		if err != nil {
+			return nil, err
+		}
+	case pglogrepl.DeleteMessageTupleTypeOld:
+		if len(m.OldTuple.Columns) != len(rel.Columns) {
+			return nil, fmt.Errorf("old tuple for %s has %d columns, want %d", rel.Name, len(m.OldTuple.Columns), len(rel.Columns))
+		}
+		oldFull := d.decodeTuple(rel, m.OldTuple)
+		oldKey = make([]ColumnValue, len(rel.KeyColumnIndexes))
+		for i, idx := range rel.KeyColumnIndexes {
+			oldKey[i] = oldFull[idx]
+		}
+	default:
+		return nil, fmt.Errorf("delete for %s has old tuple with invalid type %q", rel.Name, m.OldTupleType)
 	}
 	return &DeleteMessage{
 		RelationID: m.RelationID,

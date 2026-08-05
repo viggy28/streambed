@@ -233,11 +233,9 @@ func TestDecodeUpdate_KeyChangedUsesOldTuple(t *testing.T) {
 		RelationID:   1,
 		OldTupleType: 'K',
 		OldTuple: &pglogrepl.TupleData{
-			// With 'K', pglogrepl still gives us a tuple sized to the
-			// relation's columns; non-key positions appear as nulls.
+			// A 'K' tuple contains only replica-identity columns.
 			Columns: []*pglogrepl.TupleDataColumn{
 				{DataType: 't', Data: []byte("7")}, // old id
-				{DataType: 'n'},
 			},
 		},
 		NewTuple: &pglogrepl.TupleData{
@@ -328,7 +326,6 @@ func TestDecodeDelete(t *testing.T) {
 		OldTuple: &pglogrepl.TupleData{
 			Columns: []*pglogrepl.TupleDataColumn{
 				{DataType: 't', Data: []byte("55")},
-				{DataType: 'n'},
 			},
 		},
 	})
@@ -341,6 +338,99 @@ func TestDecodeDelete(t *testing.T) {
 	}
 	if len(del.OldKey) != 1 || string(del.OldKey[0].Value) != "55" {
 		t.Errorf("OldKey=%+v, want ['55']", del.OldKey)
+	}
+}
+
+func TestDecodeCompactKeyTuplesUseKeyPositions(t *testing.T) {
+	d := testDecoder()
+	d.Decode(&pglogrepl.RelationMessage{
+		RelationID: 10, Namespace: "public", RelationName: "nonleading",
+		Columns: []*pglogrepl.RelationMessageColumn{
+			{Name: "payload", DataType: 25},
+			{Flags: 1, Name: "id", DataType: 23},
+			{Name: "other", DataType: 25},
+		},
+	})
+	update, err := d.Decode(&pglogrepl.UpdateMessage{
+		RelationID: 10, OldTupleType: pglogrepl.UpdateMessageTupleTypeKey,
+		OldTuple: &pglogrepl.TupleData{Columns: []*pglogrepl.TupleDataColumn{{DataType: 't', Data: []byte("41")}}},
+		NewTuple: &pglogrepl.TupleData{Columns: []*pglogrepl.TupleDataColumn{
+			{DataType: 't', Data: []byte("payload")}, {DataType: 't', Data: []byte("42")}, {DataType: 't', Data: []byte("other")},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := update.(*UpdateMessage).OldKey
+	if len(key) != 1 || key[0].Name != "id" || key[0].OID != 23 || string(key[0].Value) != "41" {
+		t.Fatalf("old key=%+v, want compact id=41", key)
+	}
+
+	d.Decode(&pglogrepl.RelationMessage{
+		RelationID: 11, Namespace: "public", RelationName: "composite",
+		Columns: []*pglogrepl.RelationMessageColumn{
+			{Flags: 1, Name: "tenant", DataType: 23},
+			{Name: "payload", DataType: 25},
+			{Flags: 1, Name: "item", DataType: 20},
+			{Name: "other", DataType: 25},
+		},
+	})
+	deleted, err := d.Decode(&pglogrepl.DeleteMessage{
+		RelationID: 11, OldTupleType: pglogrepl.DeleteMessageTupleTypeKey,
+		OldTuple: &pglogrepl.TupleData{Columns: []*pglogrepl.TupleDataColumn{
+			{DataType: 't', Data: []byte("7")}, {DataType: 't', Data: []byte("99")},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := deleted.(*DeleteMessage).OldKey
+	if len(keys) != 2 || keys[0].Name != "tenant" || keys[1].Name != "item" || string(keys[0].Value) != "7" || string(keys[1].Value) != "99" {
+		t.Fatalf("composite old key=%+v", keys)
+	}
+}
+
+func TestDecodeRelationWidthKeyTuple(t *testing.T) {
+	d := testDecoder()
+	d.Decode(&pglogrepl.RelationMessage{
+		RelationID: 13, Namespace: "public", RelationName: "relation_width_key",
+		Columns: []*pglogrepl.RelationMessageColumn{
+			{Flags: 1, Name: "tenant", DataType: 23},
+			{Flags: 1, Name: "item", DataType: 23},
+			{Name: "payload", DataType: 25},
+		},
+	})
+	result, err := d.Decode(&pglogrepl.UpdateMessage{
+		RelationID: 13, OldTupleType: pglogrepl.UpdateMessageTupleTypeKey,
+		OldTuple: &pglogrepl.TupleData{Columns: []*pglogrepl.TupleDataColumn{
+			{DataType: 't', Data: []byte("7")},
+			{DataType: 't', Data: []byte("99")},
+			{DataType: 'n'},
+		}},
+		NewTuple: &pglogrepl.TupleData{Columns: []*pglogrepl.TupleDataColumn{
+			{DataType: 't', Data: []byte("7")},
+			{DataType: 't', Data: []byte("100")},
+			{DataType: 't', Data: []byte("new")},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := result.(*UpdateMessage).OldKey
+	if len(keys) != 2 || string(keys[0].Value) != "7" || string(keys[1].Value) != "99" {
+		t.Fatalf("relation-width old key=%+v", keys)
+	}
+}
+
+func TestDecodeKeyTupleRejectsWrongColumnCount(t *testing.T) {
+	d := testDecoder()
+	registerTwoColRelation(d, 12)
+	_, err := d.Decode(&pglogrepl.DeleteMessage{
+		RelationID: 12, OldTupleType: pglogrepl.DeleteMessageTupleTypeKey,
+		OldTuple: &pglogrepl.TupleData{Columns: []*pglogrepl.TupleDataColumn{}},
+	})
+	if err == nil {
+		t.Fatal("expected compact key tuple count error")
 	}
 }
 

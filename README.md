@@ -39,7 +39,7 @@ go build -o streambed ./cmd/streambed
 psql -h localhost -p 5433 -U postgres -d postgres
 ```
 
-Run `streambed sync --help` for all configuration options. All flags support environment variables with `STREAMBED_` prefix (e.g. `STREAMBED_SOURCE_URL`).
+Run `streambed sync --help` for all configuration options. All flags support environment variables with `STREAMBED_` prefix (e.g. `STREAMBED_SOURCE_URL`). UPDATE/DELETE use copy-on-write by default; opt into Iceberg v2 equality deletes with `--mutation-mode=mor` (or `STREAMBED_MUTATION_MODE=mor`) after verifying reader compatibility. Once a table has active equality deletes, Streambed fails startup in COW mode; continue using MOR.
 
 ## Architecture
 

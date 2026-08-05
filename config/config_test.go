@@ -26,6 +26,9 @@ func TestDefaults(t *testing.T) {
 	if cfg.LogLevel != "INFO" {
 		t.Errorf("expected LogLevel 'INFO', got %q", cfg.LogLevel)
 	}
+	if cfg.MutationMode != "cow" {
+		t.Errorf("expected MutationMode 'cow', got %q", cfg.MutationMode)
+	}
 }
 
 func TestLoadFromEnv(t *testing.T) {
@@ -36,6 +39,7 @@ func TestLoadFromEnv(t *testing.T) {
 	os.Setenv("STREAMBED_FLUSH_INTERVAL_SEC", "10")
 	os.Setenv("STREAMBED_INCLUDE_TABLES", "public.orders, public.users")
 	os.Setenv("STREAMBED_LOG_LEVEL", "debug")
+	os.Setenv("STREAMBED_MUTATION_MODE", "mor")
 	defer func() {
 		os.Unsetenv("STREAMBED_SOURCE_URL")
 		os.Unsetenv("STREAMBED_S3_BUCKET")
@@ -44,6 +48,7 @@ func TestLoadFromEnv(t *testing.T) {
 		os.Unsetenv("STREAMBED_FLUSH_INTERVAL_SEC")
 		os.Unsetenv("STREAMBED_INCLUDE_TABLES")
 		os.Unsetenv("STREAMBED_LOG_LEVEL")
+		os.Unsetenv("STREAMBED_MUTATION_MODE")
 	}()
 
 	cfg := Load()
@@ -68,6 +73,9 @@ func TestLoadFromEnv(t *testing.T) {
 	if cfg.LogLevel != "DEBUG" {
 		t.Errorf("expected LogLevel 'DEBUG', got %q", cfg.LogLevel)
 	}
+	if cfg.MutationMode != "mor" {
+		t.Errorf("expected MutationMode 'mor', got %q", cfg.MutationMode)
+	}
 }
 
 func TestValidate(t *testing.T) {
@@ -82,6 +90,8 @@ func TestValidate(t *testing.T) {
 			c.IncludeTables = []string{"a"}
 			c.ExcludeTables = []string{"b"}
 		}, "cannot use both"},
+		{"invalid mutation mode", func(c *Config) { c.MutationMode = "invalid" }, "mutation-mode must be one of"},
+		{"mor mutation mode", func(c *Config) { c.MutationMode = "mor" }, ""},
 		{"valid config", func(c *Config) {}, ""},
 	}
 
@@ -92,6 +102,7 @@ func TestValidate(t *testing.T) {
 				S3Bucket:      "bucket",
 				FlushRows:     10000,
 				FlushInterval: 30 * time.Second,
+				MutationMode:  "cow",
 			}
 			tt.modify(cfg)
 			err := cfg.Validate()

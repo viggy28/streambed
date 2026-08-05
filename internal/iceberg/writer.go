@@ -15,6 +15,22 @@ import (
 	"github.com/viggy28/streambed/internal/wal"
 )
 
+// MutationMode controls how UPDATE and DELETE events are persisted.
+type MutationMode string
+
+const (
+	MutationModeCOW MutationMode = "cow"
+	MutationModeMOR MutationMode = "mor"
+)
+
+// WriterOption configures a Writer.
+type WriterOption func(*Writer)
+
+// WithMutationMode selects copy-on-write or merge-on-read mutations.
+func WithMutationMode(mode MutationMode) WriterOption {
+	return func(w *Writer) { w.mutationMode = mode }
+}
+
 // Writer receives RowEvents, buffers them per table, and flushes to S3 + Iceberg.
 type Writer struct {
 	catalog       *Catalog
@@ -24,6 +40,7 @@ type Writer struct {
 	slotName      string
 	flushRows     int
 	flushInterval time.Duration
+	mutationMode  MutationMode
 	logger        *slog.Logger
 
 	buffers map[string]*tableBuffer // key: "schema.table"
@@ -63,8 +80,9 @@ func NewWriter(
 	flushRows int,
 	flushInterval time.Duration,
 	logger *slog.Logger,
+	opts ...WriterOption,
 ) *Writer {
-	return &Writer{
+	w := &Writer{
 		catalog:       catalog,
 		parquet:       &pqbuilder.Builder{},
 		storage:       s3Client,
@@ -72,9 +90,14 @@ func NewWriter(
 		slotName:      slotName,
 		flushRows:     flushRows,
 		flushInterval: flushInterval,
+		mutationMode:  MutationModeCOW,
 		logger:        logger,
 		buffers:       make(map[string]*tableBuffer),
 	}
+	for _, opt := range opts {
+		opt(w)
+	}
+	return w
 }
 
 // HandleEvent buffers or processes a single RowEvent. If the event causes
@@ -296,6 +319,22 @@ func (w *Writer) buffer(event wal.RowEvent) bool {
 			keyRow[i] = pqbuilder.Value{Data: v.Value, IsNull: v.IsNull}
 		}
 		buf.Deletes = append(buf.Deletes, keyRow)
+
+		// A primary-key-changing UPDATE can create an intermediate row that
+		// is updated again in the same flush. Equality deletes from this
+		// snapshot do not apply to same-sequence replacement rows, so mark the
+		// old key as net-deleted when it differs from the new key and suppress
+		// that intermediate replacement row in dedupRows.
+		if event.Op == wal.OpUpdate && len(buf.KeyColumns) > 0 && len(buf.Rows) > 0 {
+			newKey := extractKey(buf.Rows[len(buf.Rows)-1], buf.KeyColumns)
+			oldKeyString := buildKeyString(keyRow)
+			if oldKeyString != buildKeyString(newKey) {
+				if buf.deletedKeys == nil {
+					buf.deletedKeys = make(map[string]bool)
+				}
+				buf.deletedKeys[oldKeyString] = true
+			}
+		}
 	}
 
 	// For standalone DELETEs, mark the key as net-deleted so that any
@@ -355,6 +394,8 @@ func (w *Writer) flush(ctx context.Context, key string) error {
 		w.logger.Warn("skipping delete-only flush for non-existent table",
 			"table", key, "deletes", delCount)
 		buf.Deletes = nil
+		buf.deletedKeys = nil
+		buf.FirstLSN = 0
 		return nil
 	}
 	if !tableExists {
@@ -390,54 +431,60 @@ func (w *Writer) flush(ctx context.Context, key string) error {
 	}
 
 	var dataFile *DataFile
+	var eqDeleteFile *EqDeleteFile
 	replace := false
+	dataRows := buf.Rows
 
 	if delCount > 0 && len(buf.KeyColumns) > 0 {
-		// Copy-on-write: read existing data, remove deleted rows, combine
-		// with new inserts, and write a replacement snapshot.
-		replace = true
+		if w.mutationMode == MutationModeMOR {
+			// Merge-on-read: append only the final replacement rows and a
+			// key-only equality-delete file. CommitChangeset gives both files
+			// the same data sequence number, so the delete applies to older
+			// data but not to replacement rows in this snapshot.
+			dataRows = dedupRows(buf.Rows, buf.KeyColumns, buf.deletedKeys)
+			deleteRows := dedupValueRows(buf.Deletes)
+			eqDeleteFile, err = w.writeEqualityDeleteFile(ctx, key, buf, deleteRows)
+			if err != nil {
+				return err
+			}
+			w.logger.Info("MOR merge",
+				"table", key,
+				"new_rows", len(dataRows),
+				"raw_rows", rowCount,
+				"delete_keys", len(deleteRows),
+			)
+		} else {
+			// Copy-on-write: read existing data, remove deleted rows, combine
+			// with new inserts, and write a replacement snapshot. Refuse to
+			// read an MOR table because readExistingRows intentionally skips
+			// delete manifests and would resurrect deleted rows.
+			hasDeletes, err := w.catalog.HasEqualityDeleteFiles(ctx, buf.Schema, buf.Table)
+			if err != nil {
+				return fmt.Errorf("check delete files for %s: %w", key, err)
+			}
+			if hasDeletes {
+				return fmt.Errorf("cannot use COW for %s: current snapshot has equality deletes; continue with MOR or compact first", key)
+			}
+			replace = true
 
-		existingRows, err := w.readExistingRows(ctx, buf, cols)
-		if err != nil {
-			return fmt.Errorf("COW read for %s: %w", key, err)
-		}
+			existingRows, err := w.readExistingRows(ctx, buf, cols)
+			if err != nil {
+				return fmt.Errorf("COW read for %s: %w", key, err)
+			}
 
-		// Filter out rows matching any delete key.
-		filtered := filterDeletedRows(existingRows, buf.Deletes, buf.KeyColumns)
+			filtered := filterDeletedRows(existingRows, buf.Deletes, buf.KeyColumns)
+			dedupedNew := dedupRows(buf.Rows, buf.KeyColumns, buf.deletedKeys)
+			dataRows = append(filtered, dedupedNew...)
 
-		// Dedup new rows: collapse multiple updates on the same key to the
-		// last version, and exclude keys that were net-deleted in this batch.
-		dedupedNew := dedupRows(buf.Rows, buf.KeyColumns, buf.deletedKeys)
-
-		// Combine surviving existing rows with deduped new rows.
-		combined := append(filtered, dedupedNew...)
-
-		w.logger.Info("COW merge",
-			"table", key,
-			"existing", len(existingRows),
-			"after_filter", len(filtered),
-			"new_rows", len(dedupedNew),
-			"raw_rows", rowCount,
-			"combined", len(combined),
-			"deletes_applied", delCount,
-		)
-
-		// Always write a Parquet file, even with 0 rows. This preserves
-		// the schema so DuckDB can still query the table (returning 0 rows)
-		// instead of failing with "No snapshots found" or "table not found".
-		parquetData, err := w.parquet.Build(cols, combined)
-		if err != nil {
-			return fmt.Errorf("build parquet for %s: %w", key, err)
-		}
-		dataFileName := fmt.Sprintf("data/%s.parquet", uuid.New().String())
-		s3Key := fmt.Sprintf("%s/%s/%s/%s", w.catalog.prefix, buf.Schema, buf.Table, dataFileName)
-		if err := w.storage.PutObject(ctx, s3Key, parquetData, "application/octet-stream"); err != nil {
-			return fmt.Errorf("upload parquet for %s: %w", key, err)
-		}
-		dataFile = &DataFile{
-			Path:     dataFileName,
-			RowCount: int64(len(combined)),
-			FileSize: int64(len(parquetData)),
+			w.logger.Info("COW merge",
+				"table", key,
+				"existing", len(existingRows),
+				"after_filter", len(filtered),
+				"new_rows", len(dedupedNew),
+				"raw_rows", rowCount,
+				"combined", len(dataRows),
+				"deletes_applied", delCount,
+			)
 		}
 	} else if delCount > 0 {
 		w.logger.Warn("dropping deletes for table without key columns",
@@ -445,33 +492,32 @@ func (w *Writer) flush(ctx context.Context, key string) error {
 		buf.Deletes = nil
 	}
 
-	// Append-only path: just write new rows.
-	if !replace && rowCount > 0 {
-		parquetData, err := w.parquet.Build(cols, buf.Rows)
+	// COW writes an empty replacement file when all rows were removed so
+	// DuckDB can still query the table. MOR delete-only commits need no data
+	// file: the equality-delete file is sufficient.
+	if len(dataRows) > 0 || (replace && delCount > 0) {
+		dataFile, err = w.writeDataFile(ctx, key, buf, cols, dataRows)
 		if err != nil {
-			return fmt.Errorf("build parquet for %s: %w", key, err)
-		}
-		dataFileName := fmt.Sprintf("data/%s.parquet", uuid.New().String())
-		s3Key := fmt.Sprintf("%s/%s/%s/%s", w.catalog.prefix, buf.Schema, buf.Table, dataFileName)
-		if err := w.storage.PutObject(ctx, s3Key, parquetData, "application/octet-stream"); err != nil {
-			return fmt.Errorf("upload parquet for %s: %w", key, err)
-		}
-		dataFile = &DataFile{
-			Path:     dataFileName,
-			RowCount: int64(rowCount),
-			FileSize: int64(len(parquetData)),
+			return err
 		}
 	}
 
-	// Commit snapshot.
-	if err := w.catalog.CommitChangeset(ctx, buf.Schema, buf.Table, dataFile, nil, replace, buf.LastLSN.String()); err != nil {
+	if dataFile == nil && eqDeleteFile == nil {
+		return fmt.Errorf("flush %s produced no data or delete file", key)
+	}
+
+	// Commit data and equality deletes atomically in one Iceberg snapshot.
+	if err := w.catalog.CommitChangeset(ctx, buf.Schema, buf.Table, dataFile, eqDeleteFile, replace, buf.LastLSN.String()); err != nil {
 		return fmt.Errorf("commit snapshot for %s: %w", key, err)
 	}
 
 	duration := time.Since(start)
-	var dataBytes int64
+	var dataBytes, deleteBytes int64
 	if dataFile != nil {
 		dataBytes = dataFile.FileSize
+	}
+	if eqDeleteFile != nil {
+		deleteBytes = eqDeleteFile.FileSize
 	}
 	// NOTE: test/integration/throughput_test.go taps this log line to measure
 	// throughput. If you change the message string ("flush completed") or the
@@ -483,7 +529,9 @@ func (w *Writer) flush(ctx context.Context, key string) error {
 		"rows", rowCount,
 		"deletes", delCount,
 		"cow", replace,
+		"mutation_mode", string(w.mutationMode),
 		"data_bytes", dataBytes,
+		"delete_bytes", deleteBytes,
 		"duration_ms", duration.Milliseconds(),
 	)
 
@@ -567,6 +615,61 @@ func (w *Writer) ComputePendingMinLSN() pglogrepl.LSN {
 	return min
 }
 
+func (w *Writer) writeDataFile(ctx context.Context, key string, buf *tableBuffer, cols []pqbuilder.ColumnDef, rows [][]pqbuilder.Value) (*DataFile, error) {
+	parquetData, err := w.parquet.Build(cols, rows)
+	if err != nil {
+		return nil, fmt.Errorf("build parquet for %s: %w", key, err)
+	}
+	name := fmt.Sprintf("data/%s.parquet", uuid.New().String())
+	s3Key := fmt.Sprintf("%s/%s/%s/%s", w.catalog.prefix, buf.Schema, buf.Table, name)
+	if err := w.storage.PutObject(ctx, s3Key, parquetData, "application/octet-stream"); err != nil {
+		return nil, fmt.Errorf("upload parquet for %s: %w", key, err)
+	}
+	return &DataFile{Path: name, RowCount: int64(len(rows)), FileSize: int64(len(parquetData))}, nil
+}
+
+func (w *Writer) writeEqualityDeleteFile(ctx context.Context, key string, buf *tableBuffer, rows [][]pqbuilder.Value) (*EqDeleteFile, error) {
+	if len(rows) == 0 {
+		return nil, nil
+	}
+
+	cols := make([]pqbuilder.ColumnDef, len(buf.KeyColumns))
+	fieldIDs := make([]int, len(buf.KeyColumns))
+	for i, idx := range buf.KeyColumns {
+		if idx < 0 || idx >= len(buf.Columns) {
+			return nil, fmt.Errorf("build equality delete for %s: key column index %d out of range", key, idx)
+		}
+		col := buf.Columns[idx]
+		fieldID, ok := buf.fieldIDs[col.Name]
+		if !ok || fieldID <= 0 {
+			return nil, fmt.Errorf("build equality delete for %s: missing Iceberg field ID for key column %q", key, col.Name)
+		}
+		cols[i] = pqbuilder.ColumnDef{Name: col.Name, OID: col.OID, FieldID: fieldID}
+		fieldIDs[i] = fieldID
+	}
+	for i, row := range rows {
+		if len(row) != len(cols) {
+			return nil, fmt.Errorf("build equality delete for %s: row %d has %d key values, want %d", key, i, len(row), len(cols))
+		}
+	}
+
+	parquetData, err := w.parquet.Build(cols, rows)
+	if err != nil {
+		return nil, fmt.Errorf("build equality-delete parquet for %s: %w", key, err)
+	}
+	name := fmt.Sprintf("data/%s-delete.parquet", uuid.New().String())
+	s3Key := fmt.Sprintf("%s/%s/%s/%s", w.catalog.prefix, buf.Schema, buf.Table, name)
+	if err := w.storage.PutObject(ctx, s3Key, parquetData, "application/octet-stream"); err != nil {
+		return nil, fmt.Errorf("upload equality-delete parquet for %s: %w", key, err)
+	}
+	return &EqDeleteFile{
+		Path:             name,
+		RowCount:         int64(len(rows)),
+		FileSize:         int64(len(parquetData)),
+		EqualityFieldIDs: fieldIDs,
+	}, nil
+}
+
 // readExistingRows downloads all current data files for a table from S3
 // and parses them back to Value rows using the parquet reader.
 func (w *Writer) readExistingRows(ctx context.Context, buf *tableBuffer, cols []pqbuilder.ColumnDef) ([][]pqbuilder.Value, error) {
@@ -630,6 +733,23 @@ func extractKey(row []pqbuilder.Value, keyColumns []int) []pqbuilder.Value {
 		}
 	}
 	return kv
+}
+
+// dedupValueRows removes duplicate rows while preserving first-seen order.
+// Equality-delete files only need one copy of each key, even when a key is
+// updated repeatedly in the same flush.
+func dedupValueRows(rows [][]pqbuilder.Value) [][]pqbuilder.Value {
+	seen := make(map[string]struct{}, len(rows))
+	result := make([][]pqbuilder.Value, 0, len(rows))
+	for _, row := range rows {
+		key := buildKeyString(row)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, row)
+	}
+	return result
 }
 
 // dedupRows collapses multiple rows with the same key down to the last

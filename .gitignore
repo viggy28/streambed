@@ -4,6 +4,7 @@ streambed
 /simtest
 simtest-logs/
 .claude
+.pi-subagents/
 
 # Hugo site
 site/public/

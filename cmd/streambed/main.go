@@ -56,6 +56,7 @@ func main() {
 	syncCmd.Flags().StringSliceVar(&cfg.IncludeTables, "include-tables", cfg.IncludeTables, "Tables to include")
 	syncCmd.Flags().StringSliceVar(&cfg.ExcludeTables, "exclude-tables", cfg.ExcludeTables, "Tables to exclude")
 	syncCmd.Flags().StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level (DEBUG, INFO, WARN, ERROR)")
+	syncCmd.Flags().StringVar(&cfg.MutationMode, "mutation-mode", cfg.MutationMode, "Iceberg mutation strategy: cow or mor")
 	syncCmd.Flags().StringVar(&cfg.QueryAddr, "query-addr", cfg.QueryAddr, "Listen address for query server (e.g., :5433)")
 
 	queryCmd := &cobra.Command{
@@ -151,6 +152,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 			cfg.SlotName = f.Value.String()
 		case "log-level":
 			cfg.LogLevel = f.Value.String()
+		case "mutation-mode":
+			cfg.MutationMode = strings.ToLower(f.Value.String())
 		case "query-addr":
 			cfg.QueryAddr = f.Value.String()
 		}
@@ -169,6 +172,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 		"slot", cfg.SlotName,
 		"flush_rows", cfg.FlushRows,
 		"flush_interval", cfg.FlushInterval,
+		"mutation_mode", cfg.MutationMode,
 	)
 
 	go func() {
@@ -194,10 +198,16 @@ func runSync(cmd *cobra.Command, args []string) error {
 	}
 	defer stateStore.Close()
 
-	// Initialize S3 client
+	// Initialize S3 client and validate the selected mutation strategy before
+	// starting query or replication services. This prevents a COW process from
+	// appearing healthy and failing only when its first UPDATE/DELETE arrives.
 	s3Client, err := storage.NewS3Client(ctx, cfg.S3Bucket, cfg.S3Region, cfg.S3Endpoint)
 	if err != nil {
 		return fmt.Errorf("create S3 client: %w", err)
+	}
+	catalog := iceberg.NewCatalog(s3Client, cfg.S3Bucket, cfg.S3Prefix)
+	if err := catalog.ValidateMutationMode(ctx, iceberg.MutationMode(cfg.MutationMode)); err != nil {
+		return err
 	}
 
 	// Start query server if --query-addr is set
@@ -258,9 +268,6 @@ func runSync(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("setup replication slot: %w", err)
 	}
 
-	// Initialize Iceberg catalog
-	catalog := iceberg.NewCatalog(s3Client, cfg.S3Bucket, cfg.S3Prefix)
-
 	// Read per-table flush LSNs from Iceberg (the sole source of truth).
 	// These are used for dedup on restart and to determine startLSN.
 	tableFlushLSN := make(map[string]pglogrepl.LSN)
@@ -317,7 +324,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 	// Initialize writer
 	writer := iceberg.NewWriter(catalog, s3Client, stateStore, cfg.SlotName,
-		cfg.FlushRows, cfg.FlushInterval, logger)
+		cfg.FlushRows, cfg.FlushInterval, logger,
+		iceberg.WithMutationMode(iceberg.MutationMode(cfg.MutationMode)))
 
 	// Create unified pipeline (single goroutine: reads WAL + writes Iceberg)
 	p := pipeline.New(pgConn, cfg.SlotName, pubName, startLSN, cfg.ExcludeTables,
@@ -407,7 +415,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 		// Recreate writer and pipeline with fresh state.
 		writer = iceberg.NewWriter(catalog, s3Client, stateStore, cfg.SlotName,
-			cfg.FlushRows, cfg.FlushInterval, logger)
+			cfg.FlushRows, cfg.FlushInterval, logger,
+			iceberg.WithMutationMode(iceberg.MutationMode(cfg.MutationMode)))
 		p = pipeline.New(pgConn, cfg.SlotName, pubName, startLSN, cfg.ExcludeTables,
 			logger, stateStore, tableFlushLSN, writer, cfg.FlushInterval, metaQuerier)
 

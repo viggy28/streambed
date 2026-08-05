@@ -8,7 +8,7 @@ import (
 	"os"
 	"testing"
 
-	_ "github.com/marcboeker/go-duckdb"
+	_ "github.com/duckdb/duckdb-go/v2"
 )
 
 func testLogger() *slog.Logger {
@@ -355,7 +355,7 @@ func TestIsFatalDuckDBError(t *testing.T) {
 // TestRegisterViewsDropsStaleViewOnEmptyTable verifies that RegisterViews
 // drops existing views when iceberg_scan fails with "No snapshots found".
 // We create a minimal Iceberg table with no snapshots to provoke the exact error.
-func TestRegisterViewsDropsStaleViewOnEmptyTable(t *testing.T) {
+func TestRegisterViewsReplacesStaleViewWithEmptyTable(t *testing.T) {
 	db, err := sql.Open("duckdb", "")
 	if err != nil {
 		t.Fatalf("open duckdb: %v", err)
@@ -435,14 +435,19 @@ func TestRegisterViewsDropsStaleViewOnEmptyTable(t *testing.T) {
 		t.Fatalf("unexpected fatal error: %v", err)
 	}
 
-	// The stale views should be dropped
-	db.QueryRow("SELECT COUNT(*) FROM duckdb_views() WHERE view_name = 'public_empty_tbl'").Scan(&cnt)
-	if cnt != 0 {
-		t.Error("expected stale qualified view to be dropped after empty table detection")
+	// DuckDB 1.5+ can scan an Iceberg table with no snapshots, so stale
+	// placeholder views are replaced with real views that return zero rows.
+	if err := db.QueryRow("SELECT COUNT(*) FROM public_empty_tbl").Scan(&cnt); err != nil {
+		t.Fatalf("query qualified empty view: %v", err)
 	}
-	db.QueryRow("SELECT COUNT(*) FROM duckdb_views() WHERE view_name = 'empty_tbl'").Scan(&cnt)
 	if cnt != 0 {
-		t.Error("expected stale unqualified view to be dropped after empty table detection")
+		t.Errorf("qualified empty view returned %d rows, want 0", cnt)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM empty_tbl").Scan(&cnt); err != nil {
+		t.Fatalf("query unqualified empty view: %v", err)
+	}
+	if cnt != 0 {
+		t.Errorf("unqualified empty view returned %d rows, want 0", cnt)
 	}
 }
 

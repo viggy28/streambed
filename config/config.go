@@ -21,6 +21,7 @@ type Config struct {
 	IncludeTables []string
 	ExcludeTables []string
 	LogLevel      string
+	MutationMode  string // Iceberg row mutation strategy: "cow" or "mor"
 	QueryAddr     string // listen address for query server (e.g., ":5433")
 }
 
@@ -33,6 +34,7 @@ func Default() *Config {
 		FlushRows:     10000,
 		FlushInterval: 2 * time.Second,
 		LogLevel:      "INFO",
+		MutationMode:  "cow",
 	}
 }
 
@@ -89,6 +91,9 @@ func Load() *Config {
 	if v := os.Getenv("STREAMBED_LOG_LEVEL"); v != "" {
 		cfg.LogLevel = strings.ToUpper(v)
 	}
+	if v := os.Getenv("STREAMBED_MUTATION_MODE"); v != "" {
+		cfg.MutationMode = strings.ToLower(v)
+	}
 	if v := os.Getenv("STREAMBED_QUERY_ADDR"); v != "" {
 		cfg.QueryAddr = v
 	}
@@ -123,6 +128,9 @@ func (c *Config) Validate() error {
 	}
 	if c.FlushInterval <= 0 {
 		return fmt.Errorf("flush-interval must be positive")
+	}
+	if c.MutationMode != "cow" && c.MutationMode != "mor" {
+		return fmt.Errorf("mutation-mode must be one of: cow, mor")
 	}
 	return nil
 }

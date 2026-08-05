@@ -105,15 +105,55 @@ func TestCommitEmptyTableMetadata(t *testing.T) {
 	}
 }
 
+func TestCurrentSnapshotTotalRecordsAfterOverwrite(t *testing.T) {
+	metadata := tableMetadata{
+		CurrentSnapshotID: 2,
+		Snapshots: []snapshot{
+			{SnapshotID: 1, Summary: map[string]string{"operation": "append", "added-records": "10", "total-records": "10"}},
+			{SnapshotID: 2, Summary: map[string]string{"operation": "overwrite", "added-records": "5", "total-records": "5"}},
+		},
+	}
+	total, exact := currentSnapshotTotalRecords(metadata)
+	if !exact || total != 5 {
+		t.Fatalf("current total=(%d,%v), want (5,true)", total, exact)
+	}
+	if got := total + 2; got != 7 {
+		t.Fatalf("append after overwrite total=%d, want 7", got)
+	}
+}
+
+func TestCurrentSnapshotTotalRecordsUnknown(t *testing.T) {
+	metadata := tableMetadata{CurrentSnapshotID: 2, Snapshots: []snapshot{{SnapshotID: 2, Summary: map[string]string{}}}}
+	if _, exact := currentSnapshotTotalRecords(metadata); exact {
+		t.Fatal("missing total-records must be unknown")
+	}
+}
+
+func TestEqualityDeleteHistoryOmitsUnknownTotalRecords(t *testing.T) {
+	snapshots := []snapshot{
+		{Summary: map[string]string{"added-records": "10", "total-records": "10"}},
+		{Summary: map[string]string{"added-equality-deletes": "1"}},
+	}
+	if !hasEqualityDeletes(snapshots) {
+		t.Fatal("expected equality-delete history to be detected")
+	}
+	if got := totalRecords(snapshots); got != 10 {
+		t.Fatalf("added record total=%d, want 10", got)
+	}
+	// CommitChangeset uses hasEqualityDeletes to omit total-records after
+	// MOR begins, because equality-delete matches cannot be counted without
+	// scanning data.
+}
+
 // TestCommitChangesetRoutesToEmpty verifies that CommitChangeset correctly
 // routes to commitEmptyTable when replace=true with nil or zero-row dataFile.
 // This is a logic test — it doesn't need S3 since we're testing the routing
 // conditions, not the actual S3 operations.
 func TestCommitChangesetRoutesToEmpty(t *testing.T) {
 	tests := []struct {
-		name     string
-		dataFile *DataFile
-		replace  bool
+		name      string
+		dataFile  *DataFile
+		replace   bool
 		wantEmpty bool
 	}{
 		{
@@ -377,11 +417,11 @@ func TestCommitEmptyTablePreservesSchema(t *testing.T) {
 // append, COW-replace, and empty-table paths based on buffer state.
 func TestCOWWriterFlushDecision(t *testing.T) {
 	tests := []struct {
-		name       string
-		rows       int
-		deletes    int
-		keyCols    int
-		wantCOW    bool
+		name        string
+		rows        int
+		deletes     int
+		keyCols     int
+		wantCOW     bool
 		wantSkipDel bool
 	}{
 		{"insert only", 10, 0, 1, false, false},

@@ -50,15 +50,17 @@ type benchResult struct {
 // (message "flush completed" and attribute keys rows/deletes/data_bytes/duration_ms).
 // If you change that log line, update this handler too.
 type flushTracker struct {
-	mu        sync.Mutex
-	events    []flushEvent
-	cumRows   int64
-	firstAt   time.Time
-	lastAt    time.Time
-	target    int64
-	doneAt    time.Time
-	doneCh    chan struct{}
-	doneOnce  sync.Once
+	mu            sync.Mutex
+	events        []flushEvent
+	cumRows       int64
+	cumDeletes    int64
+	firstAt       time.Time
+	lastAt        time.Time
+	target        int64
+	targetDeletes int64
+	doneAt        time.Time
+	doneCh        chan struct{}
+	doneOnce      sync.Once
 }
 
 type flushEvent struct {
@@ -70,9 +72,14 @@ type flushEvent struct {
 }
 
 func newFlushTracker(target int64) *flushTracker {
+	return newMutationFlushTracker(target, -1)
+}
+
+func newMutationFlushTracker(targetRows, targetDeletes int64) *flushTracker {
 	return &flushTracker{
-		target: target,
-		doneCh: make(chan struct{}),
+		target:        targetRows,
+		targetDeletes: targetDeletes,
+		doneCh:        make(chan struct{}),
 	}
 }
 
@@ -104,9 +111,10 @@ func (f *flushTracker) Handle(_ context.Context, r slog.Record) error {
 		f.firstAt = ev.At
 	}
 	f.cumRows += ev.Rows
+	f.cumDeletes += ev.Deletes
 	f.lastAt = ev.At
 	f.events = append(f.events, ev)
-	reached := f.cumRows >= f.target
+	reached := f.cumRows >= f.target && (f.targetDeletes < 0 || f.cumDeletes >= f.targetDeletes)
 	if reached && f.doneAt.IsZero() {
 		f.doneAt = ev.At
 	}
@@ -260,8 +268,13 @@ func buildInsertSQL(tableName string, startIdx, n int) string {
 // or the timeout fires. The returned tracker contains per-flush metrics.
 func runSyncBench(t *testing.T, ctx context.Context, expectedRows int, flushRowsCfg int, flushInterval time.Duration, timeout time.Duration) (*flushTracker, error) {
 	t.Helper()
+	return runSyncBenchWithMode(t, ctx, expectedRows, flushRowsCfg, flushInterval, timeout, iceberg.MutationModeCOW, nil, false, -1)
+}
 
-	tracker := newFlushTracker(int64(expectedRows))
+func runSyncBenchWithMode(t *testing.T, ctx context.Context, expectedRows int, flushRowsCfg int, flushInterval time.Duration, timeout time.Duration, mode iceberg.MutationMode, metrics *benchStorageMetrics, waitForStandbyAck bool, expectedDeletes int, statePaths ...string) (*flushTracker, error) {
+	t.Helper()
+
+	tracker := newMutationFlushTracker(int64(expectedRows), int64(expectedDeletes))
 	// Writer's logger uses ONLY the tracker — we don't care about stderr noise
 	// during a benchmark run, and routing through tracker keeps the hot path lean.
 	writerLogger := slog.New(tracker)
@@ -269,8 +282,12 @@ func runSyncBench(t *testing.T, ctx context.Context, expectedRows int, flushRows
 	// confuse the tracker (which only matches "flush completed").
 	pipelineLogger := slog.New(slog.NewTextHandler(noopWriter{}, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	// State store
+	// State store. Multi-phase benchmarks pass one path so startup dedup can
+	// reconcile against the prior phase's committed Iceberg LSN.
 	statePath := t.TempDir() + "/state.db"
+	if len(statePaths) > 0 && statePaths[0] != "" {
+		statePath = statePaths[0]
+	}
 	stateStore, err := state.Open(statePath)
 	if err != nil {
 		t.Fatalf("open state store: %v", err)
@@ -278,9 +295,14 @@ func runSyncBench(t *testing.T, ctx context.Context, expectedRows int, flushRows
 	defer stateStore.Close()
 
 	// S3 client
-	s3Client, err := storage.NewS3Client(ctx, s3Bucket, s3Region, minioEndpoint)
+	baseS3Client, err := storage.NewS3Client(ctx, s3Bucket, s3Region, minioEndpoint)
 	if err != nil {
 		t.Fatalf("create S3 client: %v", err)
+	}
+	var s3Client storage.ObjectStorage = baseS3Client
+	if metrics != nil {
+		metrics.inner = baseS3Client
+		s3Client = metrics
 	}
 
 	// Postgres replication connection
@@ -329,7 +351,7 @@ func runSyncBench(t *testing.T, ctx context.Context, expectedRows int, flushRows
 
 	// Writer with bench config and tracker-only logger
 	writer := iceberg.NewWriter(catalog, s3Client, stateStore, slotName,
-		flushRowsCfg, flushInterval, writerLogger)
+		flushRowsCfg, flushInterval, writerLogger, iceberg.WithMutationMode(mode))
 
 	metaConn, err := pgx.Connect(ctx, pgConnStr())
 	if err != nil {
@@ -357,6 +379,16 @@ func runSyncBench(t *testing.T, ctx context.Context, expectedRows int, flushRows
 
 	select {
 	case <-tracker.doneCh:
+		// Multi-phase benchmarks must let the pipeline send a standby status
+		// after the durable flush. Cancelling immediately leaves the slot behind
+		// and makes the measured mutation phase replay the entire baseline WAL.
+		if waitForStandbyAck {
+			select {
+			case err := <-pipelineDone:
+				return tracker, fmt.Errorf("pipeline exited before standby acknowledgement: %v", err)
+			case <-time.After(11 * time.Second):
+			}
+		}
 		cancel()
 		<-pipelineDone
 		return tracker, nil

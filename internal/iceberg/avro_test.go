@@ -1,6 +1,7 @@
 package iceberg
 
 import (
+	"bytes"
 	"testing"
 
 	ice "github.com/apache/iceberg-go"
@@ -129,6 +130,20 @@ func TestWriteEqDeleteManifestAvro(t *testing.T) {
 	}
 	if mf.ManifestContent() != ice.ManifestContentDeletes {
 		t.Errorf("expected delete manifest content, got %v", mf.ManifestContent())
+	}
+	entries, err := ice.ReadManifest(mf, bytes.NewReader(data), false)
+	if err != nil {
+		t.Fatalf("read delete manifest: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries=%d, want 1", len(entries))
+	}
+	entry := entries[0]
+	if entry.SequenceNum() != 1 {
+		t.Errorf("data sequence=%d, want 1", entry.SequenceNum())
+	}
+	if got := entry.DataFile().EqualityFieldIDs(); len(got) != 1 || got[0] != 1 {
+		t.Errorf("equality field IDs=%v, want [1]", got)
 	}
 }
 

@@ -12,6 +12,9 @@ products — see [caveats](#caveats) below.
   config and transaction shape.
 - [update-shape.md](update-shape.md) — UPDATE throughput by transaction
   shape. Exercises the writer's copy-on-write merge path.
+- [mutation-modes.md](mutation-modes.md) — opt-in Copy-on-Write vs
+  Merge-on-Read benchmark at 10 MiB, 100 MiB, and 1 GiB, with a labeled
+  100 GiB extrapolation model.
 
 Planned:
 - `steady-state.md` — sustained INSERT rate under continuous load.

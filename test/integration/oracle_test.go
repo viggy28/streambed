@@ -157,12 +157,32 @@ func queryIcebergRows(t *testing.T, duckDB *sql.DB, schema, table string, keyCol
 			keyParts[i] = rowMap[colNames[ki]]
 		}
 		compositeKey := strings.Join(keyParts, "|")
-		rows[compositeKey] = rowMap
+		if err := addUniqueOracleRow(rows, compositeKey, rowMap); err != nil {
+			t.Fatalf("oracle: %v", err)
+		}
 	}
 	if err := sqlRows.Err(); err != nil {
 		t.Fatalf("oracle: rows iteration: %v", err)
 	}
 	return rows
+}
+
+func addUniqueOracleRow(rows map[string]map[string]string, key string, row map[string]string) error {
+	if previous, exists := rows[key]; exists {
+		return fmt.Errorf("duplicate Iceberg primary key %q: first=%v duplicate=%v", key, previous, row)
+	}
+	rows[key] = row
+	return nil
+}
+
+func TestOracleRejectsDuplicateIcebergKeys(t *testing.T) {
+	rows := make(map[string]map[string]string)
+	if err := addUniqueOracleRow(rows, "1|2", map[string]string{"value": "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := addUniqueOracleRow(rows, "1|2", map[string]string{"value": "duplicate"}); err == nil {
+		t.Fatal("expected duplicate primary key error")
+	}
 }
 
 // diffRowSets compares two row sets and returns discrepancies.
