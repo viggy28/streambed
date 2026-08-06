@@ -492,17 +492,17 @@ func (w *Writer) flush(ctx context.Context, key string) error {
 		buf.Deletes = nil
 	}
 
-	// COW writes an empty replacement file when all rows were removed so
-	// DuckDB can still query the table. MOR delete-only commits need no data
-	// file: the equality-delete file is sufficient.
-	if len(dataRows) > 0 || (replace && delCount > 0) {
+	// COW delete-all commits use the catalog's empty-table metadata path.
+	// MOR delete-only commits need no data file: the equality-delete file is
+	// sufficient.
+	if len(dataRows) > 0 {
 		dataFile, err = w.writeDataFile(ctx, key, buf, cols, dataRows)
 		if err != nil {
 			return err
 		}
 	}
 
-	if dataFile == nil && eqDeleteFile == nil {
+	if dataFile == nil && eqDeleteFile == nil && !replace {
 		return fmt.Errorf("flush %s produced no data or delete file", key)
 	}
 
