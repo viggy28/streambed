@@ -69,10 +69,6 @@ func configureDuckDBPerConn(ctx context.Context, con *sql.Conn, cfg ServerConfig
 		// which Postgres clients expect (e.g. NOW() - INTERVAL '7 days').
 		"INSTALL icu",
 		"LOAD icu",
-		// Iceberg's version-hint.text is intentionally overwritten on every
-		// commit. A concurrent query may observe its ETag changing between the
-		// HEAD and GET requests even though referenced metadata is immutable.
-		"SET GLOBAL unsafe_disable_etag_checks = true",
 	}
 
 	// Configure S3 access. Use GLOBAL scope so settings apply to every
@@ -128,9 +124,6 @@ func configureDuckDB(db *sql.DB, cfg ServerConfig) error {
 		// which Postgres clients expect (e.g. NOW() - INTERVAL '7 days').
 		"INSTALL icu",
 		"LOAD icu",
-		// See configureDuckDBPerConn: version-hint.text is mutable, while the
-		// metadata and data files selected by it are immutable.
-		"SET GLOBAL unsafe_disable_etag_checks = true",
 	}
 
 	// Configure S3 access. Use GLOBAL scope so settings apply to every
