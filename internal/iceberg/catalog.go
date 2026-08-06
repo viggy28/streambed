@@ -557,9 +557,10 @@ func (c *Catalog) CommitChangeset(
 		return fmt.Errorf("commit changeset: both data and delete are nil")
 	}
 
-	// COW with no data file at all (shouldn't happen now that the writer
-	// always writes a Parquet file, but kept as a safety net).
-	if replace && dataFile == nil {
+	// COW replacement with no rows means the table is logically empty. Do not
+	// publish a zero-row data manifest: iceberg-go rejects true 0-row entries,
+	// and advertising a fake row count can make readers retain a ghost row.
+	if replace && (dataFile == nil || dataFile.RowCount == 0) {
 		return c.commitEmptyTable(ctx, schema, table, flushLSN)
 	}
 	basePath := c.tablePath(schema, table)

@@ -518,6 +518,66 @@ func TestFlushCOW(t *testing.T) {
 	}
 }
 
+func TestFlushCOWLargeBatchedDeleteAllCommitsEmptyTable(t *testing.T) {
+	w, mem := testWriter(t)
+	w.flushRows = 100
+	ctx := context.Background()
+
+	const totalRows = 250
+	for i := 1; i <= totalRows; i++ {
+		if _, err := w.HandleEvent(ctx, insertEvent("public", "accounts", pglogrepl.LSN(i), strconv.Itoa(i), "live")); err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+	if err := w.FlushAll(ctx); err != nil {
+		t.Fatalf("flush inserts: %v", err)
+	}
+
+	for i := 1; i <= totalRows; i++ {
+		lsn := pglogrepl.LSN(1000 + i)
+		if _, err := w.HandleEvent(ctx, deleteEvent("public", "accounts", lsn, strconv.Itoa(i))); err != nil {
+			t.Fatalf("delete %d: %v", i, err)
+		}
+	}
+	if err := w.FlushAll(ctx); err != nil {
+		t.Fatalf("flush final partial deletes: %v", err)
+	}
+
+	paths, err := w.catalog.GetDataFilePaths(ctx, "public", "accounts")
+	if err != nil {
+		t.Fatalf("GetDataFilePaths: %v", err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("current data files=%d, want none for empty COW table: %v", len(paths), paths)
+	}
+
+	hint, err := mem.GetObject(ctx, "test-prefix/public/accounts/metadata/version-hint.text")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metaData, err := mem.GetObject(ctx, fmt.Sprintf("test-prefix/public/accounts/metadata/v%s.metadata.json", hint))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta tableMetadata
+	if err := json.Unmarshal(metaData, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.CurrentSnapshotID != -1 {
+		t.Fatalf("current-snapshot-id=%d, want -1", meta.CurrentSnapshotID)
+	}
+	if len(meta.Snapshots) != 0 {
+		t.Fatalf("snapshots=%d, want none in empty-table metadata", len(meta.Snapshots))
+	}
+	lsn, found, err := w.catalog.GetSnapshotFlushLSN(ctx, "public", "accounts")
+	if err != nil {
+		t.Fatalf("GetSnapshotFlushLSN: %v", err)
+	}
+	if !found || lsn != pglogrepl.LSN(1000+totalRows).String() {
+		t.Fatalf("flush LSN=(%q,%v), want %s", lsn, found, pglogrepl.LSN(1000+totalRows))
+	}
+}
+
 func TestFlushMORWritesEqualityDeletesWithoutReadingData(t *testing.T) {
 	for _, tc := range []struct {
 		mode          MutationMode
