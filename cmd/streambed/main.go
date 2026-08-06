@@ -150,6 +150,14 @@ func runSync(cmd *cobra.Command, args []string) error {
 			cfg.StatePath = f.Value.String()
 		case "slot-name":
 			cfg.SlotName = f.Value.String()
+		case "flush-rows":
+			cfg.FlushRows, _ = cmd.Flags().GetInt("flush-rows")
+		case "flush-interval":
+			cfg.FlushInterval, _ = cmd.Flags().GetDuration("flush-interval")
+		case "include-tables":
+			cfg.IncludeTables, _ = cmd.Flags().GetStringSlice("include-tables")
+		case "exclude-tables":
+			cfg.ExcludeTables, _ = cmd.Flags().GetStringSlice("exclude-tables")
 		case "log-level":
 			cfg.LogLevel = f.Value.String()
 		case "mutation-mode":
