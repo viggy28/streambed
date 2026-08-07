@@ -53,6 +53,7 @@ func main() {
 	syncCmd.Flags().StringVar(&cfg.SlotName, "slot-name", cfg.SlotName, "Replication slot name")
 	syncCmd.Flags().IntVar(&cfg.FlushRows, "flush-rows", cfg.FlushRows, "Row buffer flush threshold")
 	syncCmd.Flags().DurationVar(&cfg.FlushInterval, "flush-interval", cfg.FlushInterval, "Time-based flush interval")
+	syncCmd.Flags().IntVar(&cfg.TargetFileSizeMB, "target-file-size-mb", cfg.TargetFileSizeMB, "Target compressed Parquet data file size in MiB")
 	syncCmd.Flags().StringSliceVar(&cfg.IncludeTables, "include-tables", cfg.IncludeTables, "Tables to include")
 	syncCmd.Flags().StringSliceVar(&cfg.ExcludeTables, "exclude-tables", cfg.ExcludeTables, "Tables to exclude")
 	syncCmd.Flags().StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level (DEBUG, INFO, WARN, ERROR)")
@@ -97,6 +98,29 @@ This command does NOT touch the Postgres replication slot.`,
 	cleanupCmd.Flags().StringVar(&cfg.StatePath, "state-path", cfg.StatePath, "SQLite state file path")
 	cleanupCmd.Flags().StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level (DEBUG, INFO, WARN, ERROR)")
 
+	var maintenanceTables []string
+	var maintenanceRetainLast int
+	var maintenanceOrphans bool
+	var maintenanceDryRun bool
+	var maintenanceForce bool
+	maintenanceCmd := &cobra.Command{
+		Use:   "maintenance",
+		Short: "Expire Iceberg snapshots and clean orphan files",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runMaintenance(cmd, maintenanceTables, maintenanceRetainLast, maintenanceOrphans, maintenanceDryRun, maintenanceForce)
+		},
+	}
+	maintenanceCmd.Flags().StringSliceVar(&maintenanceTables, "table", nil, "Table to maintain as schema.table (repeatable, required)")
+	maintenanceCmd.Flags().IntVar(&maintenanceRetainLast, "retain-last", 1, "Number of non-current historical snapshots to retain")
+	maintenanceCmd.Flags().BoolVar(&maintenanceOrphans, "orphans", false, "Also delete orphan objects unreachable from retained metadata")
+	maintenanceCmd.Flags().BoolVar(&maintenanceDryRun, "dry-run", true, "Only print planned deletions")
+	maintenanceCmd.Flags().BoolVar(&maintenanceForce, "force", false, "Apply deletions; required with --dry-run=false")
+	maintenanceCmd.Flags().StringVar(&cfg.S3Bucket, "s3-bucket", cfg.S3Bucket, "S3 bucket name")
+	maintenanceCmd.Flags().StringVar(&cfg.S3Prefix, "s3-prefix", cfg.S3Prefix, "S3 key prefix")
+	maintenanceCmd.Flags().StringVar(&cfg.S3Endpoint, "s3-endpoint", cfg.S3Endpoint, "Custom S3 endpoint (MinIO)")
+	maintenanceCmd.Flags().StringVar(&cfg.S3Region, "s3-region", cfg.S3Region, "AWS region")
+	maintenanceCmd.Flags().StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level (DEBUG, INFO, WARN, ERROR)")
+
 	var resyncTable string
 	var resyncForce bool
 	resyncCmd := &cobra.Command{
@@ -123,7 +147,7 @@ snapshot LSN are silently discarded for this table to avoid duplicates.`,
 	resyncCmd.Flags().IntVar(&cfg.FlushRows, "flush-rows", cfg.FlushRows, "Rows per parquet file / Iceberg snapshot")
 	resyncCmd.Flags().StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level (DEBUG, INFO, WARN, ERROR)")
 
-	rootCmd.AddCommand(syncCmd, queryCmd, cleanupCmd, resyncCmd)
+	rootCmd.AddCommand(syncCmd, queryCmd, cleanupCmd, maintenanceCmd, resyncCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -154,6 +178,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 			cfg.FlushRows, _ = cmd.Flags().GetInt("flush-rows")
 		case "flush-interval":
 			cfg.FlushInterval, _ = cmd.Flags().GetDuration("flush-interval")
+		case "target-file-size-mb":
+			cfg.TargetFileSizeMB, _ = cmd.Flags().GetInt("target-file-size-mb")
 		case "include-tables":
 			cfg.IncludeTables, _ = cmd.Flags().GetStringSlice("include-tables")
 		case "exclude-tables":
@@ -180,6 +206,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 		"slot", cfg.SlotName,
 		"flush_rows", cfg.FlushRows,
 		"flush_interval", cfg.FlushInterval,
+		"target_file_size_mb", cfg.TargetFileSizeMB,
 		"mutation_mode", cfg.MutationMode,
 	)
 
@@ -333,7 +360,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 	// Initialize writer
 	writer := iceberg.NewWriter(catalog, s3Client, stateStore, cfg.SlotName,
 		cfg.FlushRows, cfg.FlushInterval, logger,
-		iceberg.WithMutationMode(iceberg.MutationMode(cfg.MutationMode)))
+		iceberg.WithMutationMode(iceberg.MutationMode(cfg.MutationMode)),
+		iceberg.WithTargetFileSizeBytes(int64(cfg.TargetFileSizeMB)*1024*1024))
 
 	// Create unified pipeline (single goroutine: reads WAL + writes Iceberg)
 	p := pipeline.New(pgConn, cfg.SlotName, pubName, startLSN, cfg.ExcludeTables,
@@ -424,7 +452,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 		// Recreate writer and pipeline with fresh state.
 		writer = iceberg.NewWriter(catalog, s3Client, stateStore, cfg.SlotName,
 			cfg.FlushRows, cfg.FlushInterval, logger,
-			iceberg.WithMutationMode(iceberg.MutationMode(cfg.MutationMode)))
+			iceberg.WithMutationMode(iceberg.MutationMode(cfg.MutationMode)),
+			iceberg.WithTargetFileSizeBytes(int64(cfg.TargetFileSizeMB)*1024*1024))
 		p = pipeline.New(pgConn, cfg.SlotName, pubName, startLSN, cfg.ExcludeTables,
 			logger, stateStore, tableFlushLSN, writer, cfg.FlushInterval, metaQuerier)
 
@@ -615,6 +644,64 @@ func runCleanup(cmd *cobra.Command, tables []string, dryRun, force bool) error {
 	}
 
 	logger.Info("cleanup complete")
+	return nil
+}
+
+// runMaintenance expires old Iceberg snapshots and optionally removes objects
+// that are no longer reachable from retained metadata. It should not be run
+// concurrently with a writer for the same table/prefix.
+func runMaintenance(cmd *cobra.Command, tables []string, retainLast int, includeOrphans bool, dryRun bool, force bool) error {
+	cfg := config.Load()
+	cmd.Flags().Visit(func(f *pflag.Flag) {
+		switch f.Name {
+		case "s3-bucket":
+			cfg.S3Bucket = f.Value.String()
+		case "s3-prefix":
+			cfg.S3Prefix = f.Value.String()
+		case "s3-endpoint":
+			cfg.S3Endpoint = f.Value.String()
+		case "s3-region":
+			cfg.S3Region = f.Value.String()
+		case "log-level":
+			cfg.LogLevel = f.Value.String()
+		}
+	})
+	if len(tables) == 0 {
+		return fmt.Errorf("--table schema.table is required")
+	}
+	if !dryRun && !force {
+		return fmt.Errorf("--force is required when --dry-run=false")
+	}
+	if includeOrphans && !dryRun {
+		return fmt.Errorf("orphan deletion currently supports dry-run only")
+	}
+	if cfg.S3Bucket == "" {
+		return fmt.Errorf("s3-bucket is required")
+	}
+	ctx := context.Background()
+	s3Client, err := storage.NewS3Client(ctx, cfg.S3Bucket, cfg.S3Region, cfg.S3Endpoint)
+	if err != nil {
+		return fmt.Errorf("create S3 client: %w", err)
+	}
+	catalog := iceberg.NewCatalog(s3Client, cfg.S3Bucket, cfg.S3Prefix)
+	for _, tableRef := range tables {
+		parts := strings.Split(tableRef, ".")
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return fmt.Errorf("invalid table %q, want schema.table", tableRef)
+		}
+		plan, err := catalog.ExpireSnapshots(ctx, parts[0], parts[1], retainLast, dryRun)
+		if err != nil {
+			return fmt.Errorf("expire snapshots for %s: %w", tableRef, err)
+		}
+		fmt.Printf("%s: expired_snapshots=%d delete_objects=%d dry_run=%v\n", tableRef, plan.ExpiredSnapshots, len(plan.DeleteObjects), dryRun)
+		if includeOrphans {
+			orphanPlan, err := catalog.DeleteOrphanFiles(ctx, parts[0], parts[1], dryRun)
+			if err != nil {
+				return fmt.Errorf("delete orphans for %s: %w", tableRef, err)
+			}
+			fmt.Printf("%s: orphan_delete_objects=%d dry_run=%v\n", tableRef, len(orphanPlan.DeleteObjects), dryRun)
+		}
+	}
 	return nil
 }
 

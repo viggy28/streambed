@@ -63,6 +63,67 @@ func buildIcebergSchema(columns []ColumnDef) *ice.Schema {
 	return ice.NewSchema(0, fields...)
 }
 
+type dataManifestEntry struct {
+	FilePath string
+	File     DataFile
+}
+
+func buildIcebergDataFile(path string, rowCount, fileSize int64, lower, upper map[int][]byte, content ice.ManifestEntryContent) (ice.DataFile, error) {
+	dfBuilder, err := ice.NewDataFileBuilder(
+		*ice.UnpartitionedSpec,
+		content,
+		path,
+		ice.ParquetFile,
+		nil, nil, nil,
+		rowCount,
+		fileSize,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build data file: %w", err)
+	}
+	if len(lower) > 0 {
+		dfBuilder.LowerBoundValues(lower)
+	}
+	if len(upper) > 0 {
+		dfBuilder.UpperBoundValues(upper)
+	}
+	return dfBuilder.Build(), nil
+}
+
+// writeDataManifestAvro writes an Avro data manifest containing one or more
+// data files. Returns the raw Avro bytes and ManifestFile metadata object.
+func writeDataManifestAvro(
+	filename string,
+	schema *ice.Schema,
+	snapshotID int64,
+	seqNum int64,
+	files []dataManifestEntry,
+) ([]byte, ice.ManifestFile, error) {
+	entries := make([]ice.ManifestEntry, 0, len(files))
+	for _, f := range files {
+		df, err := buildIcebergDataFile(f.FilePath, f.File.RowCount, f.File.FileSize, f.File.LowerBounds, f.File.UpperBounds, ice.EntryContentData)
+		if err != nil {
+			return nil, nil, err
+		}
+		entry := ice.NewManifestEntryBuilder(
+			ice.EntryStatusADDED,
+			&snapshotID,
+			df,
+		).
+			SequenceNum(seqNum).
+			FileSequenceNum(seqNum).
+			Build()
+		entries = append(entries, entry)
+	}
+
+	buf := new(bytes.Buffer)
+	mf, err := ice.WriteManifest(filename, buf, 2, *ice.UnpartitionedSpec, schema, snapshotID, entries)
+	if err != nil {
+		return nil, nil, fmt.Errorf("write manifest: %w", err)
+	}
+	return buf.Bytes(), mf, nil
+}
+
 // writeManifestAvro writes an Avro manifest file using iceberg-go's WriteManifest.
 // Returns the raw Avro bytes and the ManifestFile metadata object.
 func writeManifestAvro(
@@ -74,39 +135,10 @@ func writeManifestAvro(
 	rowCount int64,
 	fileSize int64,
 ) ([]byte, ice.ManifestFile, error) {
-	// Build DataFile
-	dfBuilder, err := ice.NewDataFileBuilder(
-		*ice.UnpartitionedSpec,
-		ice.EntryContentData,
-		dataFilePath,
-		ice.ParquetFile,
-		nil, nil, nil,
-		rowCount,
-		fileSize,
-	)
-	if err != nil {
-		return nil, nil, fmt.Errorf("build data file: %w", err)
-	}
-	df := dfBuilder.Build()
-
-	// Build ManifestEntry
-	entry := ice.NewManifestEntryBuilder(
-		ice.EntryStatusADDED,
-		&snapshotID,
-		df,
-	).
-		SequenceNum(seqNum).
-		FileSequenceNum(seqNum).
-		Build()
-
-	// Write manifest
-	buf := new(bytes.Buffer)
-	mf, err := ice.WriteManifest(filename, buf, 2, *ice.UnpartitionedSpec, schema, snapshotID, []ice.ManifestEntry{entry})
-	if err != nil {
-		return nil, nil, fmt.Errorf("write manifest: %w", err)
-	}
-
-	return buf.Bytes(), mf, nil
+	return writeDataManifestAvro(filename, schema, snapshotID, seqNum, []dataManifestEntry{{
+		FilePath: dataFilePath,
+		File:     DataFile{RowCount: rowCount, FileSize: fileSize},
+	}})
 }
 
 // writeEqDeleteManifestAvro writes an Avro manifest file that tracks one
