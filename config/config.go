@@ -9,32 +9,34 @@ import (
 )
 
 type Config struct {
-	SourceURL     string
-	S3Bucket      string
-	S3Prefix      string
-	S3Endpoint    string
-	S3Region      string
-	StatePath     string
-	SlotName      string
-	FlushRows     int
-	FlushInterval time.Duration
-	IncludeTables []string
-	ExcludeTables []string
-	LogLevel      string
-	MutationMode  string // Iceberg row mutation strategy: "cow" or "mor"
-	QueryAddr     string // listen address for query server (e.g., ":5433")
+	SourceURL        string
+	S3Bucket         string
+	S3Prefix         string
+	S3Endpoint       string
+	S3Region         string
+	StatePath        string
+	SlotName         string
+	FlushRows        int
+	FlushInterval    time.Duration
+	TargetFileSizeMB int
+	IncludeTables    []string
+	ExcludeTables    []string
+	LogLevel         string
+	MutationMode     string // Iceberg row mutation strategy: "cow" or "mor"
+	QueryAddr        string // listen address for query server (e.g., ":5433")
 }
 
 func Default() *Config {
 	return &Config{
-		S3Prefix:      "streambed/",
-		S3Region:      "us-east-1",
-		StatePath:     defaultStatePath(),
-		SlotName:      "streambed",
-		FlushRows:     10000,
-		FlushInterval: 2 * time.Second,
-		LogLevel:      "INFO",
-		MutationMode:  "cow",
+		S3Prefix:         "streambed/",
+		S3Region:         "us-east-1",
+		StatePath:        defaultStatePath(),
+		SlotName:         "streambed",
+		FlushRows:        10000,
+		FlushInterval:    2 * time.Second,
+		TargetFileSizeMB: 128,
+		LogLevel:         "INFO",
+		MutationMode:     "cow",
 	}
 }
 
@@ -80,6 +82,11 @@ func Load() *Config {
 	if v := os.Getenv("STREAMBED_FLUSH_INTERVAL_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.FlushInterval = time.Duration(n) * time.Second
+		}
+	}
+	if v := os.Getenv("STREAMBED_TARGET_FILE_SIZE_MB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.TargetFileSizeMB = n
 		}
 	}
 	if v := os.Getenv("STREAMBED_INCLUDE_TABLES"); v != "" {
@@ -128,6 +135,9 @@ func (c *Config) Validate() error {
 	}
 	if c.FlushInterval <= 0 {
 		return fmt.Errorf("flush-interval must be positive")
+	}
+	if c.TargetFileSizeMB <= 0 {
+		return fmt.Errorf("target-file-size-mb must be positive")
 	}
 	if c.MutationMode != "cow" && c.MutationMode != "mor" {
 		return fmt.Errorf("mutation-mode must be one of: cow, mor")

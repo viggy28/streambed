@@ -23,6 +23,9 @@ func TestDefaults(t *testing.T) {
 	if cfg.FlushInterval != 2*time.Second {
 		t.Errorf("expected FlushInterval 2s, got %v", cfg.FlushInterval)
 	}
+	if cfg.TargetFileSizeMB != 128 {
+		t.Errorf("expected TargetFileSizeMB 128, got %d", cfg.TargetFileSizeMB)
+	}
 	if cfg.LogLevel != "INFO" {
 		t.Errorf("expected LogLevel 'INFO', got %q", cfg.LogLevel)
 	}
@@ -37,6 +40,7 @@ func TestLoadFromEnv(t *testing.T) {
 	os.Setenv("STREAMBED_S3_PREFIX", "data/")
 	os.Setenv("STREAMBED_FLUSH_ROWS", "5000")
 	os.Setenv("STREAMBED_FLUSH_INTERVAL_SEC", "10")
+	os.Setenv("STREAMBED_TARGET_FILE_SIZE_MB", "64")
 	os.Setenv("STREAMBED_INCLUDE_TABLES", "public.orders, public.users")
 	os.Setenv("STREAMBED_LOG_LEVEL", "debug")
 	os.Setenv("STREAMBED_MUTATION_MODE", "mor")
@@ -46,6 +50,7 @@ func TestLoadFromEnv(t *testing.T) {
 		os.Unsetenv("STREAMBED_S3_PREFIX")
 		os.Unsetenv("STREAMBED_FLUSH_ROWS")
 		os.Unsetenv("STREAMBED_FLUSH_INTERVAL_SEC")
+		os.Unsetenv("STREAMBED_TARGET_FILE_SIZE_MB")
 		os.Unsetenv("STREAMBED_INCLUDE_TABLES")
 		os.Unsetenv("STREAMBED_LOG_LEVEL")
 		os.Unsetenv("STREAMBED_MUTATION_MODE")
@@ -66,6 +71,9 @@ func TestLoadFromEnv(t *testing.T) {
 	}
 	if cfg.FlushInterval != 10*time.Second {
 		t.Errorf("expected FlushInterval 10s, got %v", cfg.FlushInterval)
+	}
+	if cfg.TargetFileSizeMB != 64 {
+		t.Errorf("expected TargetFileSizeMB 64, got %d", cfg.TargetFileSizeMB)
 	}
 	if len(cfg.IncludeTables) != 2 || cfg.IncludeTables[0] != "public.orders" || cfg.IncludeTables[1] != "public.users" {
 		t.Errorf("expected IncludeTables [public.orders, public.users], got %v", cfg.IncludeTables)
@@ -98,11 +106,12 @@ func TestValidate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &Config{
-				SourceURL:     "postgres://localhost/test",
-				S3Bucket:      "bucket",
-				FlushRows:     10000,
-				FlushInterval: 30 * time.Second,
-				MutationMode:  "cow",
+				SourceURL:        "postgres://localhost/test",
+				S3Bucket:         "bucket",
+				FlushRows:        10000,
+				FlushInterval:    30 * time.Second,
+				TargetFileSizeMB: 128,
+				MutationMode:     "cow",
 			}
 			tt.modify(cfg)
 			err := cfg.Validate()

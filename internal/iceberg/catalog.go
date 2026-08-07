@@ -25,9 +25,11 @@ type ColumnDef struct {
 
 // DataFile describes a Parquet data file to be committed.
 type DataFile struct {
-	Path     string // relative path under the table directory (e.g., "data/xxx.parquet")
-	RowCount int64
-	FileSize int64
+	Path        string // relative path under the table directory (e.g., "data/xxx.parquet") or full s3:// URI for existing files
+	RowCount    int64
+	FileSize    int64
+	LowerBounds map[int][]byte
+	UpperBounds map[int][]byte
 }
 
 // EqDeleteFile describes a Parquet equality-delete file to be committed.
@@ -364,9 +366,10 @@ func (c *Catalog) EvolveSchema(
 	return fieldIDs, nil
 }
 
-// GetDataFilePaths returns the S3 paths of all data files in the current
-// snapshot for the given table. Returns nil if the table has no snapshots.
-func (c *Catalog) GetDataFilePaths(ctx context.Context, schema, table string) ([]string, error) {
+// GetActiveDataFiles returns all active data files in the current snapshot.
+// Bounds are populated when present in the Iceberg manifest. Returns nil if
+// the table has no current snapshot.
+func (c *Catalog) GetActiveDataFiles(ctx context.Context, schema, table string) ([]DataFile, error) {
 	basePath := c.tablePath(schema, table)
 
 	hintKey := path.Join(basePath, "metadata", "version-hint.text")
@@ -393,7 +396,6 @@ func (c *Catalog) GetDataFilePaths(ctx context.Context, schema, table string) ([
 		return nil, nil
 	}
 
-	// Find manifest list for the current snapshot.
 	var manifestListURI string
 	for _, snap := range metadata.Snapshots {
 		if snap.SnapshotID == metadata.CurrentSnapshotID {
@@ -414,9 +416,8 @@ func (c *Catalog) GetDataFilePaths(ctx context.Context, schema, table string) ([
 		return nil, fmt.Errorf("parse manifest list: %w", err)
 	}
 
-	var paths []string
+	var files []DataFile
 	for _, mf := range manifests {
-		// Only read data manifests, skip delete manifests.
 		if mf.ManifestContent() != ice.ManifestContentData {
 			continue
 		}
@@ -429,10 +430,45 @@ func (c *Catalog) GetDataFilePaths(ctx context.Context, schema, table string) ([
 			return nil, fmt.Errorf("parse manifest: %w", err)
 		}
 		for _, entry := range entries {
-			paths = append(paths, entry.DataFile().FilePath())
+			if entry.Status() == ice.EntryStatusDELETED {
+				continue
+			}
+			df := entry.DataFile()
+			files = append(files, DataFile{
+				Path:        df.FilePath(),
+				RowCount:    df.Count(),
+				FileSize:    df.FileSizeBytes(),
+				LowerBounds: cloneBounds(df.LowerBoundValues()),
+				UpperBounds: cloneBounds(df.UpperBoundValues()),
+			})
 		}
 	}
+	return files, nil
+}
+
+// GetDataFilePaths returns the S3 paths of all data files in the current
+// snapshot for the given table. Returns nil if the table has no snapshots.
+func (c *Catalog) GetDataFilePaths(ctx context.Context, schema, table string) ([]string, error) {
+	files, err := c.GetActiveDataFiles(ctx, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(files))
+	for _, f := range files {
+		paths = append(paths, f.Path)
+	}
 	return paths, nil
+}
+
+func cloneBounds(in map[int][]byte) map[int][]byte {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[int][]byte, len(in))
+	for k, v := range in {
+		out[k] = append([]byte(nil), v...)
+	}
+	return out
 }
 
 // ValidateMutationMode fails fast when COW is selected but an existing table
@@ -521,30 +557,12 @@ func (c *Catalog) HasEqualityDeleteFiles(ctx context.Context, schema, table stri
 // This is a thin wrapper around CommitChangeset for append-only callers
 // (see resync and initial backfill paths).
 func (c *Catalog) CommitSnapshot(ctx context.Context, schema, table string, dataFile DataFile, flushLSN string) error {
-	return c.CommitChangeset(ctx, schema, table, &dataFile, nil, false, flushLSN)
+	return c.CommitChangesetFiles(ctx, schema, table, []DataFile{dataFile}, nil, nil, false, flushLSN)
 }
 
 // CommitChangeset atomically adds one snapshot that may contain a data
-// file and/or an equality-delete file.
-//
-// When replace is false (append mode), previous manifest files are
-// carried forward so all historical data files remain visible. When
-// replace is true (overwrite / COW mode), previous manifests are NOT
-// carried forward — only the files in this commit are visible. This is
-// used for copy-on-write deletes where the caller has already merged
-// existing data with pending changes.
-//
-// When replace is true, dataFile may be nil (meaning the table is now
-// empty after all rows were deleted).
-//
-// Steps (in order):
-//  1. Read version-hint.text → current version N
-//  2. Read v<N>.metadata.json
-//  3. Write data-manifest (Avro) if dataFile != nil
-//  4. Write eq-delete-manifest (Avro) if eqDel != nil
-//  5. Write manifest list (Avro) referencing new manifests (+ prior if !replace)
-//  6. Write v<N+1>.metadata.json with new snapshot
-//  7. Write version-hint.text with N+1 (THE LAST STEP)
+// file and/or an equality-delete file. Kept as a compatibility wrapper for
+// single-file callers.
 func (c *Catalog) CommitChangeset(
 	ctx context.Context,
 	schema, table string,
@@ -553,19 +571,39 @@ func (c *Catalog) CommitChangeset(
 	replace bool,
 	flushLSN string,
 ) error {
-	if dataFile == nil && eqDel == nil && !replace {
-		return fmt.Errorf("commit changeset: both data and delete are nil")
+	var dataFiles []DataFile
+	if dataFile != nil {
+		dataFiles = []DataFile{*dataFile}
 	}
+	var deleteFiles []EqDeleteFile
+	if eqDel != nil {
+		deleteFiles = []EqDeleteFile{*eqDel}
+	}
+	return c.CommitChangesetFiles(ctx, schema, table, dataFiles, deleteFiles, nil, replace, flushLSN)
+}
 
-	// COW replacement with no rows means the table is logically empty. Do not
-	// publish a zero-row data manifest: iceberg-go rejects true 0-row entries,
-	// and advertising a fake row count can make readers retain a ghost row.
-	if replace && (dataFile == nil || dataFile.RowCount == 0) {
+// CommitChangesetFiles commits a snapshot with multiple data/delete files.
+// In replace mode, carriedDataFiles are active existing data files that should
+// remain visible without being rewritten; dataFiles are newly written
+// replacements. In append mode, carriedDataFiles must be nil because prior
+// manifests are carried forward automatically.
+func (c *Catalog) CommitChangesetFiles(
+	ctx context.Context,
+	schema, table string,
+	dataFiles []DataFile,
+	eqDeleteFiles []EqDeleteFile,
+	carriedDataFiles []DataFile,
+	replace bool,
+	flushLSN string,
+) error {
+	if len(dataFiles) == 0 && len(eqDeleteFiles) == 0 && len(carriedDataFiles) == 0 && !replace {
+		return fmt.Errorf("commit changeset: no data or delete files")
+	}
+	if replace && len(dataFiles) == 0 && len(carriedDataFiles) == 0 {
 		return c.commitEmptyTable(ctx, schema, table, flushLSN)
 	}
-	basePath := c.tablePath(schema, table)
 
-	// 1. Read current version
+	basePath := c.tablePath(schema, table)
 	hintKey := path.Join(basePath, "metadata", "version-hint.text")
 	hintData, err := c.storage.GetObject(ctx, hintKey)
 	if err != nil {
@@ -576,65 +614,53 @@ func (c *Catalog) CommitChangeset(
 		return fmt.Errorf("parse version hint %q: %w", hintData, err)
 	}
 
-	// 2. Read current metadata
 	currentMetaKey := path.Join(basePath, "metadata", fmt.Sprintf("v%d.metadata.json", currentVersion))
 	metaData, err := c.storage.GetObject(ctx, currentMetaKey)
 	if err != nil {
 		return fmt.Errorf("read metadata v%d: %w", currentVersion, err)
 	}
-
 	var metadata tableMetadata
 	if err := json.Unmarshal(metaData, &metadata); err != nil {
 		return fmt.Errorf("parse metadata: %w", err)
 	}
 
-	// Snapshot IDs must be unique even when multiple flushes commit within the
-	// same millisecond (common in tests and local object stores). Timestamps in
-	// metadata remain milliseconds; the ID itself has no time-unit semantics.
 	snapID := time.Now().UnixNano()
 	seqNum := metadata.LastSequenceNumber + 1
-
-	// Build iceberg-go schema from metadata
 	iceSchema := schemaFromMetadata(metadata)
-
-	// 3/4. Write one manifest per content type (data vs delete).
 	var manifestFiles []ice.ManifestFile
 
-	if dataFile != nil {
-		dataFilePath := fmt.Sprintf("s3://%s/%s/%s", c.bucket, basePath, dataFile.Path)
+	allDataFiles := append([]DataFile{}, carriedDataFiles...)
+	allDataFiles = append(allDataFiles, dataFiles...)
+	if len(allDataFiles) > 0 {
 		manifestUUID := uuid.New().String()
 		manifestFilename := fmt.Sprintf("%s-m0.avro", manifestUUID)
 		manifestKey := path.Join(basePath, "metadata", manifestFilename)
 		manifestS3Path := fmt.Sprintf("s3://%s/%s", c.bucket, manifestKey)
-
-		// iceberg-go requires record_count > 0 in manifest entries. When the
-		// writer produces a 0-row Parquet file (all rows deleted via COW),
-		// advertise 1 row so the manifest passes validation. DuckDB reads the
-		// actual row count from the Parquet footer, so this is harmless.
-		manifestRowCount := dataFile.RowCount
-		if manifestRowCount == 0 {
-			manifestRowCount = 1
+		entries := make([]dataManifestEntry, 0, len(allDataFiles))
+		for _, f := range allDataFiles {
+			if f.RowCount <= 0 {
+				continue
+			}
+			entries = append(entries, dataManifestEntry{FilePath: c.dataFileURI(basePath, f), File: f})
 		}
-		manifestBytes, mf, err := writeManifestAvro(
-			manifestS3Path, iceSchema, snapID, seqNum,
-			dataFilePath, manifestRowCount, dataFile.FileSize,
-		)
-		if err != nil {
-			return fmt.Errorf("write manifest avro: %w", err)
+		if len(entries) > 0 {
+			manifestBytes, mf, err := writeDataManifestAvro(manifestS3Path, iceSchema, snapID, seqNum, entries)
+			if err != nil {
+				return fmt.Errorf("write data manifest avro: %w", err)
+			}
+			if err := c.storage.PutObject(ctx, manifestKey, manifestBytes, "application/octet-stream"); err != nil {
+				return err
+			}
+			manifestFiles = append(manifestFiles, mf)
 		}
-		if err := c.storage.PutObject(ctx, manifestKey, manifestBytes, "application/octet-stream"); err != nil {
-			return err
-		}
-		manifestFiles = append(manifestFiles, mf)
 	}
 
-	if eqDel != nil {
-		delFilePath := fmt.Sprintf("s3://%s/%s/%s", c.bucket, basePath, eqDel.Path)
+	for _, eqDel := range eqDeleteFiles {
+		delFilePath := c.dataFileURI(basePath, DataFile{Path: eqDel.Path})
 		manifestUUID := uuid.New().String()
 		manifestFilename := fmt.Sprintf("%s-m0-del.avro", manifestUUID)
 		manifestKey := path.Join(basePath, "metadata", manifestFilename)
 		manifestS3Path := fmt.Sprintf("s3://%s/%s", c.bucket, manifestKey)
-
 		manifestBytes, mf, err := writeEqDeleteManifestAvro(
 			manifestS3Path, iceSchema, snapID, seqNum,
 			delFilePath, eqDel.RowCount, eqDel.FileSize, eqDel.EqualityFieldIDs,
@@ -648,7 +674,9 @@ func (c *Catalog) CommitChangeset(
 		manifestFiles = append(manifestFiles, mf)
 	}
 
-	// Carry forward previous manifest files (append mode only).
+	// Carry forward previous manifest files in append mode only. Replace mode
+	// publishes a new active data manifest containing carried + replacement
+	// files, so old manifests are intentionally not active.
 	if !replace && metadata.CurrentSnapshotID > 0 {
 		for _, snap := range metadata.Snapshots {
 			if snap.SnapshotID == metadata.CurrentSnapshotID {
@@ -666,51 +694,47 @@ func (c *Catalog) CommitChangeset(
 	if metadata.CurrentSnapshotID > 0 {
 		parentSnapID = &metadata.CurrentSnapshotID
 	}
-
 	manifestListBytes, err := writeManifestListAvro(snapID, seqNum, parentSnapID, manifestFiles)
 	if err != nil {
 		return fmt.Errorf("write manifest list avro: %w", err)
 	}
-
 	snapUUID := uuid.New().String()
-	manifestListKey := path.Join(basePath, "metadata",
-		fmt.Sprintf("snap-%d-%s.avro", snapID, snapUUID))
+	manifestListKey := path.Join(basePath, "metadata", fmt.Sprintf("snap-%d-%s.avro", snapID, snapUUID))
 	if err := c.storage.PutObject(ctx, manifestListKey, manifestListBytes, "application/octet-stream"); err != nil {
 		return err
 	}
 
-	// 5. Write new metadata
 	newVersion := currentVersion + 1
 	metadata.LastSequenceNumber = seqNum
 	metadata.LastUpdatedMS = time.Now().UnixMilli()
 	metadata.CurrentSnapshotID = snapID
 
-	// Build summary. Operation is "append" for data-only, "delete" for
-	// delete-only, and "overwrite" for mixed (the canonical Iceberg
-	// operation name for a commit that both adds and removes rows).
-	summary := map[string]string{}
-	var addedRows int64
-	var addedData int64
-	if dataFile != nil {
-		addedData = 1
-		addedRows = dataFile.RowCount
-		summary["added-data-files"] = "1"
-		summary["added-records"] = strconv.FormatInt(dataFile.RowCount, 10)
+	var addedRows, totalRows int64
+	for _, f := range dataFiles {
+		addedRows += f.RowCount
 	}
-	var addedDeletes int64
-	var addedDeleteRows int64
-	if eqDel != nil {
-		addedDeletes = 1
-		addedDeleteRows = eqDel.RowCount
-		summary["added-delete-files"] = "1"
-		summary["added-equality-deletes"] = strconv.FormatInt(eqDel.RowCount, 10)
+	for _, f := range allDataFiles {
+		totalRows += f.RowCount
+	}
+	summary := map[string]string{}
+	if len(dataFiles) > 0 {
+		summary["added-data-files"] = strconv.Itoa(len(dataFiles))
+		summary["added-records"] = strconv.FormatInt(addedRows, 10)
+	}
+	var deleteRows int64
+	for _, f := range eqDeleteFiles {
+		deleteRows += f.RowCount
+	}
+	if len(eqDeleteFiles) > 0 {
+		summary["added-delete-files"] = strconv.Itoa(len(eqDeleteFiles))
+		summary["added-equality-deletes"] = strconv.FormatInt(deleteRows, 10)
 	}
 	switch {
 	case replace:
 		summary["operation"] = "overwrite"
-	case addedData > 0 && addedDeletes > 0:
+	case len(dataFiles) > 0 && len(eqDeleteFiles) > 0:
 		summary["operation"] = "overwrite"
-	case addedDeletes > 0:
+	case len(eqDeleteFiles) > 0:
 		summary["operation"] = "delete"
 	default:
 		summary["operation"] = "append"
@@ -719,53 +743,35 @@ func (c *Catalog) CommitChangeset(
 		summary["streambed.last_flush_lsn"] = flushLSN
 	}
 	if replace {
-		// Overwrite: total-records is exactly the replacement file's rows.
-		summary["total-records"] = strconv.FormatInt(addedRows, 10)
-	} else if eqDel == nil && !hasEqualityDeletes(metadata.Snapshots) {
-		// Continue from the current snapshot's exact total. Summing historical
-		// added-records is wrong after an overwrite because replaced rows are
-		// still present in snapshot history.
+		summary["total-records"] = strconv.FormatInt(totalRows, 10)
+	} else if len(eqDeleteFiles) == 0 && !hasEqualityDeletes(metadata.Snapshots) {
 		if currentTotal, exact := currentSnapshotTotalRecords(metadata); exact {
 			summary["total-records"] = strconv.FormatInt(currentTotal+addedRows, 10)
 		}
 	}
-	_ = addedDeleteRows
 
-	newSnapshot := snapshot{
-		SnapshotID:     snapID,
-		SequenceNumber: seqNum,
-		TimestampMS:    time.Now().UnixMilli(),
-		ManifestList:   fmt.Sprintf("s3://%s/%s", c.bucket, manifestListKey),
-		Summary:        summary,
-	}
+	newSnapshot := snapshot{SnapshotID: snapID, SequenceNumber: seqNum, TimestampMS: time.Now().UnixMilli(), ManifestList: fmt.Sprintf("s3://%s/%s", c.bucket, manifestListKey), Summary: summary}
 	metadata.Snapshots = append(metadata.Snapshots, newSnapshot)
-	metadata.SnapshotLog = append(metadata.SnapshotLog, snapshotLogEntry{
-		TimestampMS: newSnapshot.TimestampMS,
-		SnapshotID:  snapID,
-	})
-	metadata.Refs = map[string]interface{}{
-		"main": map[string]interface{}{
-			"snapshot-id": snapID,
-			"type":        "branch",
-		},
-	}
-	metadata.MetadataLog = append(metadata.MetadataLog, metadataLogEntry{
-		TimestampMS:  metadata.LastUpdatedMS,
-		MetadataFile: fmt.Sprintf("s3://%s/%s", c.bucket, currentMetaKey),
-	})
+	metadata.SnapshotLog = append(metadata.SnapshotLog, snapshotLogEntry{TimestampMS: newSnapshot.TimestampMS, SnapshotID: snapID})
+	metadata.Refs = map[string]interface{}{"main": map[string]interface{}{"snapshot-id": snapID, "type": "branch"}}
+	metadata.MetadataLog = append(metadata.MetadataLog, metadataLogEntry{TimestampMS: metadata.LastUpdatedMS, MetadataFile: fmt.Sprintf("s3://%s/%s", c.bucket, currentMetaKey)})
 
 	newMetadataJSON, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal new metadata: %w", err)
 	}
-
 	newMetaKey := path.Join(basePath, "metadata", fmt.Sprintf("v%d.metadata.json", newVersion))
 	if err := c.storage.PutObject(ctx, newMetaKey, newMetadataJSON, "application/json"); err != nil {
 		return err
 	}
-
-	// 6. Update version-hint.text — THE LAST STEP
 	return c.storage.PutObject(ctx, hintKey, []byte(strconv.Itoa(newVersion)), "text/plain")
+}
+
+func (c *Catalog) dataFileURI(basePath string, f DataFile) string {
+	if strings.HasPrefix(f.Path, "s3://") {
+		return f.Path
+	}
+	return fmt.Sprintf("s3://%s/%s/%s", c.bucket, basePath, f.Path)
 }
 
 // commitEmptyTable bumps the metadata version with current-snapshot-id = -1,

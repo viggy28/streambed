@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,17 +32,24 @@ func WithMutationMode(mode MutationMode) WriterOption {
 	return func(w *Writer) { w.mutationMode = mode }
 }
 
+// WithTargetFileSizeBytes configures the approximate compressed Parquet target
+// size for each data file. Values <= 0 preserve single-file output.
+func WithTargetFileSizeBytes(size int64) WriterOption {
+	return func(w *Writer) { w.targetFileSizeBytes = size }
+}
+
 // Writer receives RowEvents, buffers them per table, and flushes to S3 + Iceberg.
 type Writer struct {
-	catalog       *Catalog
-	parquet       *pqbuilder.Builder
-	storage       storage.ObjectStorage
-	state         *state.Store
-	slotName      string
-	flushRows     int
-	flushInterval time.Duration
-	mutationMode  MutationMode
-	logger        *slog.Logger
+	catalog             *Catalog
+	parquet             *pqbuilder.Builder
+	storage             storage.ObjectStorage
+	state               *state.Store
+	slotName            string
+	flushRows           int
+	flushInterval       time.Duration
+	mutationMode        MutationMode
+	targetFileSizeBytes int64
+	logger              *slog.Logger
 
 	buffers map[string]*tableBuffer // key: "schema.table"
 }
@@ -430,7 +438,8 @@ func (w *Writer) flush(ctx context.Context, key string) error {
 		buf.fieldIDs = fids
 	}
 
-	var dataFile *DataFile
+	var dataFiles []DataFile
+	var carriedDataFiles []DataFile
 	var eqDeleteFile *EqDeleteFile
 	replace := false
 	dataRows := buf.Rows
@@ -454,10 +463,10 @@ func (w *Writer) flush(ctx context.Context, key string) error {
 				"delete_keys", len(deleteRows),
 			)
 		} else {
-			// Copy-on-write: read existing data, remove deleted rows, combine
-			// with new inserts, and write a replacement snapshot. Refuse to
-			// read an MOR table because readExistingRows intentionally skips
-			// delete manifests and would resurrect deleted rows.
+			// Copy-on-write: rewrite only active files whose key ranges may
+			// contain the pending delete/update keys. If bounds are absent or
+			// unsupported, candidate selection conservatively falls back to all
+			// active files.
 			hasDeletes, err := w.catalog.HasEqualityDeleteFiles(ctx, buf.Schema, buf.Table)
 			if err != nil {
 				return fmt.Errorf("check delete files for %s: %w", key, err)
@@ -467,7 +476,13 @@ func (w *Writer) flush(ctx context.Context, key string) error {
 			}
 			replace = true
 
-			existingRows, err := w.readExistingRows(ctx, buf, cols)
+			activeFiles, err := w.catalog.GetActiveDataFiles(ctx, buf.Schema, buf.Table)
+			if err != nil {
+				return fmt.Errorf("list active files for %s: %w", key, err)
+			}
+			candidateFiles, carried, pruned := selectCOWFiles(activeFiles, buf, cols)
+			carriedDataFiles = carried
+			existingRows, err := w.readRowsFromFiles(ctx, candidateFiles, cols)
 			if err != nil {
 				return fmt.Errorf("COW read for %s: %w", key, err)
 			}
@@ -478,6 +493,10 @@ func (w *Writer) flush(ctx context.Context, key string) error {
 
 			w.logger.Info("COW merge",
 				"table", key,
+				"active_files", len(activeFiles),
+				"candidate_files", len(candidateFiles),
+				"carried_files", len(carriedDataFiles),
+				"pruned", pruned,
 				"existing", len(existingRows),
 				"after_filter", len(filtered),
 				"new_rows", len(dedupedNew),
@@ -492,29 +511,29 @@ func (w *Writer) flush(ctx context.Context, key string) error {
 		buf.Deletes = nil
 	}
 
-	// COW delete-all commits use the catalog's empty-table metadata path.
-	// MOR delete-only commits need no data file: the equality-delete file is
-	// sufficient.
 	if len(dataRows) > 0 {
-		dataFile, err = w.writeDataFile(ctx, key, buf, cols, dataRows)
+		dataFiles, err = w.writeDataFiles(ctx, key, buf, cols, dataRows)
 		if err != nil {
 			return err
 		}
 	}
 
-	if dataFile == nil && eqDeleteFile == nil && !replace {
+	if len(dataFiles) == 0 && eqDeleteFile == nil && !replace {
 		return fmt.Errorf("flush %s produced no data or delete file", key)
 	}
 
-	// Commit data and equality deletes atomically in one Iceberg snapshot.
-	if err := w.catalog.CommitChangeset(ctx, buf.Schema, buf.Table, dataFile, eqDeleteFile, replace, buf.LastLSN.String()); err != nil {
+	var eqDeleteFiles []EqDeleteFile
+	if eqDeleteFile != nil {
+		eqDeleteFiles = []EqDeleteFile{*eqDeleteFile}
+	}
+	if err := w.catalog.CommitChangesetFiles(ctx, buf.Schema, buf.Table, dataFiles, eqDeleteFiles, carriedDataFiles, replace, buf.LastLSN.String()); err != nil {
 		return fmt.Errorf("commit snapshot for %s: %w", key, err)
 	}
 
 	duration := time.Since(start)
 	var dataBytes, deleteBytes int64
-	if dataFile != nil {
-		dataBytes = dataFile.FileSize
+	for _, f := range dataFiles {
+		dataBytes += f.FileSize
 	}
 	if eqDeleteFile != nil {
 		deleteBytes = eqDeleteFile.FileSize
@@ -615,17 +634,55 @@ func (w *Writer) ComputePendingMinLSN() pglogrepl.LSN {
 	return min
 }
 
-func (w *Writer) writeDataFile(ctx context.Context, key string, buf *tableBuffer, cols []pqbuilder.ColumnDef, rows [][]pqbuilder.Value) (*DataFile, error) {
-	parquetData, err := w.parquet.Build(cols, rows)
+func (w *Writer) writeDataFiles(ctx context.Context, key string, buf *tableBuffer, cols []pqbuilder.ColumnDef, rows [][]pqbuilder.Value) ([]DataFile, error) {
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	chunks, err := w.splitRowsByTarget(cols, rows)
 	if err != nil {
-		return nil, fmt.Errorf("build parquet for %s: %w", key, err)
+		return nil, err
 	}
-	name := fmt.Sprintf("data/%s.parquet", uuid.New().String())
-	s3Key := fmt.Sprintf("%s/%s/%s/%s", w.catalog.prefix, buf.Schema, buf.Table, name)
-	if err := w.storage.PutObject(ctx, s3Key, parquetData, "application/octet-stream"); err != nil {
-		return nil, fmt.Errorf("upload parquet for %s: %w", key, err)
+	files := make([]DataFile, 0, len(chunks))
+	for _, chunk := range chunks {
+		parquetData, err := w.parquet.Build(cols, chunk)
+		if err != nil {
+			return nil, fmt.Errorf("build parquet for %s: %w", key, err)
+		}
+		name := fmt.Sprintf("data/%s.parquet", uuid.New().String())
+		s3Key := fmt.Sprintf("%s/%s/%s/%s", w.catalog.prefix, buf.Schema, buf.Table, name)
+		if err := w.storage.PutObject(ctx, s3Key, parquetData, "application/octet-stream"); err != nil {
+			return nil, fmt.Errorf("upload parquet for %s: %w", key, err)
+		}
+		lower, upper := computeKeyBounds(buf, chunk)
+		files = append(files, DataFile{Path: name, RowCount: int64(len(chunk)), FileSize: int64(len(parquetData)), LowerBounds: lower, UpperBounds: upper})
 	}
-	return &DataFile{Path: name, RowCount: int64(len(rows)), FileSize: int64(len(parquetData))}, nil
+	return files, nil
+}
+
+func (w *Writer) splitRowsByTarget(cols []pqbuilder.ColumnDef, rows [][]pqbuilder.Value) ([][][]pqbuilder.Value, error) {
+	if w.targetFileSizeBytes <= 0 || len(rows) <= 1 {
+		return [][][]pqbuilder.Value{rows}, nil
+	}
+	all, err := w.parquet.Build(cols, rows)
+	if err != nil {
+		return nil, fmt.Errorf("estimate parquet size: %w", err)
+	}
+	if int64(len(all)) <= w.targetFileSizeBytes {
+		return [][][]pqbuilder.Value{rows}, nil
+	}
+	rowsPerFile := int(math.Floor(float64(len(rows)) * float64(w.targetFileSizeBytes) / float64(len(all))))
+	if rowsPerFile < 1 {
+		rowsPerFile = 1
+	}
+	var chunks [][][]pqbuilder.Value
+	for start := 0; start < len(rows); start += rowsPerFile {
+		end := start + rowsPerFile
+		if end > len(rows) {
+			end = len(rows)
+		}
+		chunks = append(chunks, rows[start:end])
+	}
+	return chunks, nil
 }
 
 func (w *Writer) writeEqualityDeleteFile(ctx context.Context, key string, buf *tableBuffer, rows [][]pqbuilder.Value) (*EqDeleteFile, error) {
@@ -673,13 +730,17 @@ func (w *Writer) writeEqualityDeleteFile(ctx context.Context, key string, buf *t
 // readExistingRows downloads all current data files for a table from S3
 // and parses them back to Value rows using the parquet reader.
 func (w *Writer) readExistingRows(ctx context.Context, buf *tableBuffer, cols []pqbuilder.ColumnDef) ([][]pqbuilder.Value, error) {
-	dataFilePaths, err := w.catalog.GetDataFilePaths(ctx, buf.Schema, buf.Table)
+	files, err := w.catalog.GetActiveDataFiles(ctx, buf.Schema, buf.Table)
 	if err != nil {
 		return nil, err
 	}
+	return w.readRowsFromFiles(ctx, files, cols)
+}
 
+func (w *Writer) readRowsFromFiles(ctx context.Context, files []DataFile, cols []pqbuilder.ColumnDef) ([][]pqbuilder.Value, error) {
 	var allRows [][]pqbuilder.Value
-	for _, filePath := range dataFilePaths {
+	for _, file := range files {
+		filePath := file.Path
 		s3Key := s3KeyFromURI(filePath)
 		fileData, err := w.storage.GetObject(ctx, s3Key)
 		if err != nil {
