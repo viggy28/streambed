@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -498,6 +499,175 @@ func TestEndToEnd(t *testing.T) {
 
 	// Cleanup slot before next test
 	cleanup(t)
+}
+
+func TestFlushThresholdCreatesExpectedParquetAndMetadata(t *testing.T) {
+	skipIfNotAvailable(t)
+	ctx := context.Background()
+	listKeys := func(prefix string) []string {
+		t.Helper()
+		client := newTestS3Client(t)
+		var keys []string
+		var continuationToken *string
+		for {
+			output, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+				Bucket:            aws.String(s3Bucket),
+				Prefix:            aws.String(prefix),
+				ContinuationToken: continuationToken,
+			})
+			if err != nil {
+				t.Fatalf("list objects under %q: %v", prefix, err)
+			}
+			for _, obj := range output.Contents {
+				keys = append(keys, aws.ToString(obj.Key))
+			}
+			if output.IsTruncated == nil || !*output.IsTruncated {
+				break
+			}
+			continuationToken = output.NextContinuationToken
+		}
+		return keys
+	}
+
+	cleanup(t)
+	t.Cleanup(func() { cleanup(t) })
+	clearS3Prefix(t)
+	setupTestTable(t)
+	createSlotAndPublication(t)
+
+	const (
+		threshold = 10
+		rows      = 20
+	)
+	insertRows(t, rows)
+
+	tracker, err := runSyncBench(t, ctx, rows, threshold, 30*time.Second, 15*time.Second)
+	if err != nil {
+		t.Fatalf("sync until threshold flushes: %v", err)
+	}
+
+	tracker.mu.Lock()
+	flushEvents := append([]flushEvent(nil), tracker.events...)
+	tracker.mu.Unlock()
+	if len(flushEvents) != 2 {
+		t.Fatalf("expected 2 threshold-triggered flushes, got %d: %+v", len(flushEvents), flushEvents)
+	}
+	for i, ev := range flushEvents {
+		if ev.Rows != threshold {
+			t.Fatalf("flush %d rows = %d, want %d", i+1, ev.Rows, threshold)
+		}
+		if ev.Deletes != 0 {
+			t.Fatalf("flush %d deletes = %d, want 0", i+1, ev.Deletes)
+		}
+		if ev.DataBytes == 0 {
+			t.Fatalf("flush %d wrote zero data bytes", i+1)
+		}
+	}
+
+	dataPrefix := s3Prefix + "/public/test_events/data/"
+	metadataPrefix := s3Prefix + "/public/test_events/metadata/"
+	dataKeys := listKeys(dataPrefix)
+	if len(dataKeys) != 2 {
+		t.Fatalf("expected 2 physical Parquet data files under %s, got %d: %v", dataPrefix, len(dataKeys), dataKeys)
+	}
+	for _, key := range dataKeys {
+		if !strings.HasSuffix(key, ".parquet") || strings.HasSuffix(key, "-delete.parquet") {
+			t.Fatalf("unexpected data object key: %s", key)
+		}
+	}
+
+	rowCounts := map[int64]int{}
+	var physicalRows int64
+	client := newTestS3Client(t)
+	for _, key := range dataKeys {
+		out, err := client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(s3Bucket),
+			Key:    aws.String(key),
+		})
+		if err != nil {
+			t.Fatalf("get parquet %s: %v", key, err)
+		}
+		data, err := io.ReadAll(out.Body)
+		out.Body.Close()
+		if err != nil {
+			t.Fatalf("read parquet %s: %v", key, err)
+		}
+		file, err := pqgo.OpenFile(bytes.NewReader(data), int64(len(data)))
+		if err != nil {
+			t.Fatalf("open parquet %s: %v", key, err)
+		}
+		rowCounts[file.NumRows()]++
+		physicalRows += file.NumRows()
+	}
+	if rowCounts[threshold] != 2 || physicalRows != rows {
+		t.Fatalf("expected two %d-row Parquet files totaling %d rows, got counts=%v total=%d", threshold, rows, rowCounts, physicalRows)
+	}
+
+	latestRows := countNamedTableSnapshotRows(t, "public", "test_events")
+	if latestRows != rows {
+		t.Fatalf("latest Iceberg snapshot rows = %d, want %d", latestRows, rows)
+	}
+
+	version := strings.TrimSpace(readVersionHint(t))
+	if version != "3" {
+		t.Fatalf("version-hint.text = %q, want 3 (v1 table metadata + 2 flush commits)", version)
+	}
+
+	metadataKeys := listKeys(metadataPrefix)
+	var metadataJSONs, avroFiles int
+	for _, key := range metadataKeys {
+		switch {
+		case strings.HasSuffix(key, ".metadata.json"):
+			metadataJSONs++
+		case strings.HasSuffix(key, ".avro"):
+			avroFiles++
+		}
+	}
+	if metadataJSONs != 3 {
+		t.Fatalf("expected 3 metadata JSON files, got %d: %v", metadataJSONs, metadataKeys)
+	}
+	if avroFiles != 4 {
+		t.Fatalf("expected 4 metadata Avro files (2 manifests + 2 manifest lists), got %d: %v", avroFiles, metadataKeys)
+	}
+
+	var metadata struct {
+		CurrentSnapshotID int64 `json:"current-snapshot-id"`
+		Snapshots         []struct {
+			SnapshotID   int64             `json:"snapshot-id"`
+			ManifestList string            `json:"manifest-list"`
+			Summary      map[string]string `json:"summary"`
+		} `json:"snapshots"`
+	}
+	if err := json.Unmarshal(readMetadataJSON(t, version), &metadata); err != nil {
+		t.Fatalf("parse metadata v%s: %v", version, err)
+	}
+	if len(metadata.Snapshots) != 2 {
+		t.Fatalf("expected 2 snapshots, got %d", len(metadata.Snapshots))
+	}
+	if metadata.CurrentSnapshotID != metadata.Snapshots[1].SnapshotID {
+		t.Fatalf("current-snapshot-id = %d, want latest snapshot-id %d", metadata.CurrentSnapshotID, metadata.Snapshots[1].SnapshotID)
+	}
+	for i, snap := range metadata.Snapshots {
+		if snap.ManifestList == "" {
+			t.Fatalf("snapshot %d has empty manifest-list", i+1)
+		}
+		if snap.Summary["operation"] != "append" {
+			t.Fatalf("snapshot %d operation = %q, want append", i+1, snap.Summary["operation"])
+		}
+		if snap.Summary["added-data-files"] != "1" {
+			t.Fatalf("snapshot %d added-data-files = %q, want 1", i+1, snap.Summary["added-data-files"])
+		}
+		if snap.Summary["added-records"] != "10" {
+			t.Fatalf("snapshot %d added-records = %q, want 10", i+1, snap.Summary["added-records"])
+		}
+		if snap.Summary["streambed.last_flush_lsn"] == "" {
+			t.Fatalf("snapshot %d missing streambed.last_flush_lsn", i+1)
+		}
+	}
+	if metadata.Snapshots[1].Summary["total-records"] != "20" {
+		t.Fatalf("latest snapshot total-records = %q, want 20", metadata.Snapshots[1].Summary["total-records"])
+	}
+
 }
 
 func TestEndToEndUpdateDelete(t *testing.T) {
