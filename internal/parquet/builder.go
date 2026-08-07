@@ -2,6 +2,7 @@ package parquet
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"strconv"
@@ -113,8 +114,12 @@ func oidToParquetNode(oid uint32) parquet.Node {
 		return parquet.Date()
 	case 1114, 1184: // timestamp, timestamptz
 		return parquet.Timestamp(parquet.Microsecond)
+	case 2950: // uuid
+		return parquet.UUID()
+	case 17: // bytea
+		return parquet.Leaf(parquet.ByteArrayType)
 	default:
-		// text, varchar, uuid, json, jsonb, numeric, bytea, and everything else
+		// text, varchar, json, jsonb, numeric, and everything else
 		return parquet.String()
 	}
 }
@@ -155,10 +160,19 @@ func parseValue(oid uint32, data []byte) (interface{}, error) {
 			return nil, err
 		}
 		return t.UnixMicro(), nil
+	case 17: // bytea — Postgres text format is hex with a leading \x
+		return parseBytea(s)
 	default:
-		// text, varchar, uuid, json, jsonb, numeric, bytea — all stored as string
+		// text, varchar, uuid, json, jsonb, numeric — all stored as string
 		return s, nil
 	}
+}
+
+func parseBytea(s string) ([]byte, error) {
+	if strings.HasPrefix(s, "\\x") || strings.HasPrefix(s, "\\X") {
+		return hex.DecodeString(s[2:])
+	}
+	return []byte(s), nil
 }
 
 func parseTimestamp(s string) (time.Time, error) {

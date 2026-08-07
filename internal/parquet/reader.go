@@ -2,11 +2,13 @@ package parquet
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/parquet-go/parquet-go"
 )
 
@@ -141,7 +143,43 @@ func goValueToText(oid uint32, v interface{}) ([]byte, error) {
 		t := time.UnixMicro(micros).UTC()
 		return []byte(t.Format("2006-01-02 15:04:05.999999+00")), nil
 
-	default: // string, varchar, uuid, json, jsonb, numeric, bytea
+	case 2950: // uuid — parquet stores UUID logical values as 16 raw bytes
+		switch val := v.(type) {
+		case [16]byte:
+			return []byte(uuid.UUID(val).String()), nil
+		case []byte:
+			if len(val) == 16 {
+				id, err := uuid.FromBytes(val)
+				if err != nil {
+					return nil, err
+				}
+				return []byte(id.String()), nil
+			}
+			return val, nil
+		case string:
+			if len(val) == 16 {
+				id, err := uuid.FromBytes([]byte(val))
+				if err != nil {
+					return nil, err
+				}
+				return []byte(id.String()), nil
+			}
+			return []byte(val), nil
+		default:
+			return []byte(fmt.Sprintf("%v", v)), nil
+		}
+
+	case 17: // bytea — return Postgres hex text format
+		switch val := v.(type) {
+		case []byte:
+			return []byte(`\x` + hex.EncodeToString(val)), nil
+		case string:
+			return []byte(`\x` + hex.EncodeToString([]byte(val))), nil
+		default:
+			return []byte(fmt.Sprintf("%v", v)), nil
+		}
+
+	default: // string, varchar, json, jsonb, numeric
 		switch s := v.(type) {
 		case string:
 			return []byte(s), nil
