@@ -14,7 +14,7 @@ Every flush (not every single DML) creates a new parquet file. Typically that me
 1. It impacts the latency (specifically query read)
 2. Maintenance (S3 scales but it's not like infinite)
 
-To solve that we introduce, `maintenance` and `maintenance compact` command which does metadata maintenance, small file compaction.
+To solve that we introduce, [`maintenance`](https://streambed.dev/docs/maintenance/#snapshot-expiration) and [`maintenance compact`](https://streambed.dev/docs/maintenance/#small-file-compaction) command which does metadata maintenance, small file compaction.
 
 ## Implementation
 
