@@ -80,6 +80,36 @@ type tableBuffer struct {
 	deletedKeys map[string]bool
 }
 
+func (w *Writer) acquireCommitLock(ctx context.Context, schema, table string) (*state.TableCommitLock, error) {
+	if w.state == nil {
+		return nil, nil
+	}
+	return w.state.AcquireTableCommitLock(ctx, schema, table, "sync", 5*time.Minute, 30*time.Second)
+}
+
+func (w *Writer) refreshCommitLock(ctx context.Context, table string, lock *state.TableCommitLock) error {
+	if w.state == nil || lock == nil {
+		return nil
+	}
+	ok, err := w.state.RefreshTableCommitLock(ctx, lock, 5*time.Minute)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("commit lock for %s expired or was stolen", table)
+	}
+	return nil
+}
+
+func (w *Writer) releaseCommitLock(table string, lock *state.TableCommitLock) {
+	if w.state == nil || lock == nil {
+		return
+	}
+	if err := w.state.ReleaseTableCommitLock(context.Background(), lock); err != nil {
+		w.logger.Warn("release commit lock failed", "table", table, "error", err)
+	}
+}
+
 func NewWriter(
 	catalog *Catalog,
 	s3Client storage.ObjectStorage,
@@ -172,6 +202,14 @@ func (w *Writer) HandleSchemaChange(ctx context.Context, rel *wal.RelationMessag
 	}
 
 	if tableExists {
+		commitLock, err := w.acquireCommitLock(ctx, rel.Namespace, rel.Name)
+		if err != nil {
+			return fmt.Errorf("acquire commit lock for schema evolution %s: %w", key, err)
+		}
+		defer w.releaseCommitLock(key, commitLock)
+		if err := w.refreshCommitLock(ctx, key, commitLock); err != nil {
+			return fmt.Errorf("refresh commit lock for schema evolution %s: %w", key, err)
+		}
 		fids, err := w.catalog.EvolveSchema(ctx, rel.Namespace, rel.Name,
 			rel.Changes, rel.Columns, defaults)
 		if err != nil {
@@ -393,6 +431,15 @@ func (w *Writer) flush(ctx context.Context, key string) error {
 		}
 	}
 
+	// Coordinate metadata-changing work with maintenance. The lock is held for
+	// the whole flush so COW reads/replacements cannot race a compaction commit.
+	var err error
+	commitLock, err := w.acquireCommitLock(ctx, buf.Schema, buf.Table)
+	if err != nil {
+		return fmt.Errorf("acquire commit lock for %s: %w", key, err)
+	}
+	defer w.releaseCommitLock(key, commitLock)
+
 	// Ensure Iceberg table exists before writing anything.
 	tableExists, err := w.catalog.TableExists(ctx, buf.Schema, buf.Table)
 	if err != nil {
@@ -526,6 +573,9 @@ func (w *Writer) flush(ctx context.Context, key string) error {
 	if eqDeleteFile != nil {
 		eqDeleteFiles = []EqDeleteFile{*eqDeleteFile}
 	}
+	if err := w.refreshCommitLock(ctx, key, commitLock); err != nil {
+		return fmt.Errorf("refresh commit lock for %s: %w", key, err)
+	}
 	if err := w.catalog.CommitChangesetFiles(ctx, buf.Schema, buf.Table, dataFiles, eqDeleteFiles, carriedDataFiles, replace, buf.LastLSN.String()); err != nil {
 		return fmt.Errorf("commit snapshot for %s: %w", key, err)
 	}
@@ -600,6 +650,16 @@ func (w *Writer) Truncate(ctx context.Context, event wal.RowEvent) error {
 			"lsn", event.WALStartLSN.String(),
 		)
 		return nil
+	}
+
+	commitLock, err := w.acquireCommitLock(ctx, event.Schema, event.Table)
+	if err != nil {
+		return fmt.Errorf("acquire commit lock for truncate %s: %w", key, err)
+	}
+	defer w.releaseCommitLock(key, commitLock)
+
+	if err := w.refreshCommitLock(ctx, key, commitLock); err != nil {
+		return fmt.Errorf("refresh commit lock for truncate %s: %w", key, err)
 	}
 
 	// replace=true, dataFile=nil → catalog writes an empty-manifest

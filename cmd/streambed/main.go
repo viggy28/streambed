@@ -119,7 +119,35 @@ This command does NOT touch the Postgres replication slot.`,
 	maintenanceCmd.Flags().StringVar(&cfg.S3Prefix, "s3-prefix", cfg.S3Prefix, "S3 key prefix")
 	maintenanceCmd.Flags().StringVar(&cfg.S3Endpoint, "s3-endpoint", cfg.S3Endpoint, "Custom S3 endpoint (MinIO)")
 	maintenanceCmd.Flags().StringVar(&cfg.S3Region, "s3-region", cfg.S3Region, "AWS region")
+	maintenanceCmd.Flags().StringVar(&cfg.StatePath, "state-path", cfg.StatePath, "SQLite state file path")
 	maintenanceCmd.Flags().StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level (DEBUG, INFO, WARN, ERROR)")
+
+	var compactTable string
+	var compactTargetMB int
+	var compactThresholdMB int
+	var compactMaxInputFiles int
+	var compactDryRun bool
+	var compactForce bool
+	compactCmd := &cobra.Command{
+		Use:   "compact",
+		Short: "Compact small Iceberg data files",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runMaintenanceCompact(cmd, compactTable, compactTargetMB, compactThresholdMB, compactMaxInputFiles, compactDryRun, compactForce)
+		},
+	}
+	compactCmd.Flags().StringVar(&compactTable, "table", "", "Table to compact as schema.table (required)")
+	compactCmd.Flags().IntVar(&compactTargetMB, "target-file-size-mb", cfg.TargetFileSizeMB, "Target compacted Parquet file size in MiB")
+	compactCmd.Flags().IntVar(&compactThresholdMB, "small-file-threshold-mb", 32, "Active data files smaller than this are candidates")
+	compactCmd.Flags().IntVar(&compactMaxInputFiles, "max-input-files", 1000, "Maximum number of input files for one compaction run")
+	compactCmd.Flags().BoolVar(&compactDryRun, "dry-run", true, "Only print compaction plan")
+	compactCmd.Flags().BoolVar(&compactForce, "force", false, "Apply compaction; required with --dry-run=false")
+	compactCmd.Flags().StringVar(&cfg.S3Bucket, "s3-bucket", cfg.S3Bucket, "S3 bucket name")
+	compactCmd.Flags().StringVar(&cfg.S3Prefix, "s3-prefix", cfg.S3Prefix, "S3 key prefix")
+	compactCmd.Flags().StringVar(&cfg.S3Endpoint, "s3-endpoint", cfg.S3Endpoint, "Custom S3 endpoint (MinIO)")
+	compactCmd.Flags().StringVar(&cfg.S3Region, "s3-region", cfg.S3Region, "AWS region")
+	compactCmd.Flags().StringVar(&cfg.StatePath, "state-path", cfg.StatePath, "SQLite state file path")
+	compactCmd.Flags().StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level (DEBUG, INFO, WARN, ERROR)")
+	maintenanceCmd.AddCommand(compactCmd)
 
 	var resyncTable string
 	var resyncForce bool
@@ -650,6 +678,83 @@ func runCleanup(cmd *cobra.Command, tables []string, dryRun, force bool) error {
 // runMaintenance expires old Iceberg snapshots and optionally removes objects
 // that are no longer reachable from retained metadata. It should not be run
 // concurrently with a writer for the same table/prefix.
+func runMaintenanceCompact(cmd *cobra.Command, tableRef string, targetMB, thresholdMB, maxInputFiles int, dryRun bool, force bool) error {
+	cfg := config.Load()
+	cmd.Flags().Visit(func(f *pflag.Flag) {
+		switch f.Name {
+		case "s3-bucket":
+			cfg.S3Bucket = f.Value.String()
+		case "s3-prefix":
+			cfg.S3Prefix = f.Value.String()
+		case "s3-endpoint":
+			cfg.S3Endpoint = f.Value.String()
+		case "s3-region":
+			cfg.S3Region = f.Value.String()
+		case "state-path":
+			cfg.StatePath = f.Value.String()
+		case "log-level":
+			cfg.LogLevel = f.Value.String()
+		}
+	})
+	if tableRef == "" {
+		return fmt.Errorf("--table schema.table is required")
+	}
+	parts := strings.Split(tableRef, ".")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return fmt.Errorf("invalid table %q, want schema.table", tableRef)
+	}
+	if !dryRun && !force {
+		return fmt.Errorf("--force is required when --dry-run=false")
+	}
+	if cfg.S3Bucket == "" {
+		return fmt.Errorf("s3-bucket is required")
+	}
+	ctx := context.Background()
+	s3Client, err := storage.NewS3Client(ctx, cfg.S3Bucket, cfg.S3Region, cfg.S3Endpoint)
+	if err != nil {
+		return fmt.Errorf("create S3 client: %w", err)
+	}
+	stateStore, err := state.Open(cfg.StatePath)
+	if err != nil {
+		return fmt.Errorf("open state store: %w", err)
+	}
+	defer stateStore.Close()
+	catalog := iceberg.NewCatalog(s3Client, cfg.S3Bucket, cfg.S3Prefix)
+	opts := iceberg.CompactionOptions{
+		TargetFileSizeBytes:     int64(targetMB) * 1024 * 1024,
+		SmallFileThresholdBytes: int64(thresholdMB) * 1024 * 1024,
+		MaxInputFiles:           maxInputFiles,
+		DryRun:                  dryRun,
+	}
+	plan, result, err := iceberg.CompactSmallFiles(ctx, catalog, stateStore, opts, parts[0], parts[1])
+	if err != nil && !result.Aborted {
+		return err
+	}
+	fmt.Printf("Compaction plan for %s\n", tableRef)
+	fmt.Printf("  planned_snapshot: %d\n", plan.PlannedSnapshotID)
+	fmt.Printf("  active_delete_files: %d\n", plan.ActiveDeleteFileCount)
+	fmt.Printf("  input_files: %d\n", len(plan.InputFiles))
+	fmt.Printf("  input_bytes: %d\n", plan.InputBytes)
+	fmt.Printf("  estimated_output_files: %d\n", plan.EstimatedOutputFiles)
+	fmt.Printf("  dry_run: %v\n", dryRun)
+	if dryRun || len(plan.InputFiles) == 0 || plan.ActiveDeleteFileCount > 0 {
+		if result.AbortReason != "" {
+			fmt.Printf("  skipped: %s\n", result.AbortReason)
+		}
+		return err
+	}
+	fmt.Printf("Compacted %s\n", tableRef)
+	fmt.Printf("  validated_snapshot: %d\n", result.ValidatedSnapshotID)
+	fmt.Printf("  new_snapshot: %d\n", result.NewSnapshotID)
+	fmt.Printf("  output_files: %d\n", result.OutputFiles)
+	fmt.Printf("  output_bytes: %d\n", result.OutputBytes)
+	fmt.Printf("  carried_files: %d\n", result.CarriedFiles)
+	if result.Aborted {
+		fmt.Printf("  aborted: %s\n", result.AbortReason)
+	}
+	return err
+}
+
 func runMaintenance(cmd *cobra.Command, tables []string, retainLast int, includeOrphans bool, dryRun bool, force bool) error {
 	cfg := config.Load()
 	cmd.Flags().Visit(func(f *pflag.Flag) {
@@ -662,6 +767,8 @@ func runMaintenance(cmd *cobra.Command, tables []string, retainLast int, include
 			cfg.S3Endpoint = f.Value.String()
 		case "s3-region":
 			cfg.S3Region = f.Value.String()
+		case "state-path":
+			cfg.StatePath = f.Value.String()
 		case "log-level":
 			cfg.LogLevel = f.Value.String()
 		}
@@ -684,12 +791,39 @@ func runMaintenance(cmd *cobra.Command, tables []string, retainLast int, include
 		return fmt.Errorf("create S3 client: %w", err)
 	}
 	catalog := iceberg.NewCatalog(s3Client, cfg.S3Bucket, cfg.S3Prefix)
+	var stateStore *state.Store
+	if !dryRun {
+		stateStore, err = state.Open(cfg.StatePath)
+		if err != nil {
+			return fmt.Errorf("open state store: %w", err)
+		}
+		defer stateStore.Close()
+	}
 	for _, tableRef := range tables {
 		parts := strings.Split(tableRef, ".")
 		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 			return fmt.Errorf("invalid table %q, want schema.table", tableRef)
 		}
+		var lock *state.TableCommitLock
+		if !dryRun {
+			lock, err = stateStore.AcquireTableCommitLock(ctx, parts[0], parts[1], "maintenance-expire", 5*time.Minute, 30*time.Second)
+			if err != nil {
+				return fmt.Errorf("acquire commit lock for %s: %w", tableRef, err)
+			}
+		}
+		if lock != nil {
+			ok, err := stateStore.RefreshTableCommitLock(ctx, lock, 5*time.Minute)
+			if err != nil {
+				return fmt.Errorf("refresh commit lock for %s: %w", tableRef, err)
+			}
+			if !ok {
+				return fmt.Errorf("commit lock for %s expired or was stolen", tableRef)
+			}
+		}
 		plan, err := catalog.ExpireSnapshots(ctx, parts[0], parts[1], retainLast, dryRun)
+		if lock != nil {
+			_ = stateStore.ReleaseTableCommitLock(context.Background(), lock)
+		}
 		if err != nil {
 			return fmt.Errorf("expire snapshots for %s: %w", tableRef, err)
 		}

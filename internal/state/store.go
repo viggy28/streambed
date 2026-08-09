@@ -1,11 +1,14 @@
 package state
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pglogrepl"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -47,6 +50,14 @@ func createTables(db *sql.DB) error {
 			first_seen     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			last_flush     TIMESTAMP,
 			last_flush_lsn TEXT,
+			PRIMARY KEY (schema_name, table_name)
+		);
+		CREATE TABLE IF NOT EXISTS table_commit_locks (
+			schema_name TEXT NOT NULL,
+			table_name  TEXT NOT NULL,
+			owner       TEXT NOT NULL,
+			expires_at  INTEGER NOT NULL,
+			updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (schema_name, table_name)
 		);
 	`); err != nil {
@@ -101,7 +112,6 @@ func containsCI(s, sub string) bool {
 	return false
 }
 
-
 func (s *Store) RegisterTable(schema, table string, columnCount int) error {
 	_, err := s.db.Exec(`
 		INSERT INTO synced_tables (schema_name, table_name, column_count)
@@ -110,7 +120,6 @@ func (s *Store) RegisterTable(schema, table string, columnCount int) error {
 	`, schema, table, columnCount, columnCount)
 	return err
 }
-
 
 // RegisteredTable holds a registered table's schema and name.
 type RegisteredTable struct {
@@ -198,6 +207,94 @@ func (s *Store) ClearBackfillLSN(schema, table string) error {
 		`UPDATE synced_tables SET backfill_lsn = NULL WHERE schema_name = ? AND table_name = ?`,
 		schema, table,
 	)
+	return err
+}
+
+// TableCommitLock represents ownership of a short critical section that
+// publishes Iceberg metadata for one table. The lock is local to the shared
+// SQLite state database; all writers/maintenance processes for a table must
+// use the same state DB for this to coordinate them.
+type TableCommitLock struct {
+	Schema string
+	Table  string
+	Owner  string
+}
+
+// AcquireTableCommitLock waits up to wait for a table-level commit lock. The
+// lock expires after ttl so a crashed process does not block maintenance
+// forever. The caller must release the returned lock.
+func (s *Store) AcquireTableCommitLock(ctx context.Context, schema, table, ownerName string, ttl, wait time.Duration) (*TableCommitLock, error) {
+	if ttl <= 0 {
+		return nil, fmt.Errorf("commit lock ttl must be positive")
+	}
+	if wait < 0 {
+		return nil, fmt.Errorf("commit lock wait must be non-negative")
+	}
+	if ownerName == "" {
+		ownerName = "unknown"
+	}
+	owner := fmt.Sprintf("%s:%d:%s", ownerName, os.Getpid(), uuid.NewString())
+	deadline := time.Now().Add(wait)
+	for {
+		now := time.Now()
+		expires := now.Add(ttl).UnixMilli()
+		res, err := s.db.ExecContext(ctx, `
+			INSERT INTO table_commit_locks (schema_name, table_name, owner, expires_at, updated_at)
+			VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+			ON CONFLICT(schema_name, table_name) DO UPDATE SET
+				owner = excluded.owner,
+				expires_at = excluded.expires_at,
+				updated_at = CURRENT_TIMESTAMP
+			WHERE table_commit_locks.expires_at < ?
+		`, schema, table, owner, expires, now.UnixMilli())
+		if err != nil {
+			return nil, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			return &TableCommitLock{Schema: schema, Table: table, Owner: owner}, nil
+		}
+		if wait == 0 || time.Now().After(deadline) {
+			return nil, fmt.Errorf("timed out acquiring commit lock for %s.%s", schema, table)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// RefreshTableCommitLock verifies that the caller still owns an unexpired lock
+// and extends its expiry. It returns false if the lock was stolen or expired.
+func (s *Store) RefreshTableCommitLock(ctx context.Context, lock *TableCommitLock, ttl time.Duration) (bool, error) {
+	if lock == nil {
+		return false, nil
+	}
+	if ttl <= 0 {
+		return false, fmt.Errorf("commit lock ttl must be positive")
+	}
+	now := time.Now()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE table_commit_locks
+		SET expires_at = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE schema_name = ? AND table_name = ? AND owner = ? AND expires_at > ?
+	`, now.Add(ttl).UnixMilli(), lock.Schema, lock.Table, lock.Owner, now.UnixMilli())
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ReleaseTableCommitLock releases a lock if the caller still owns it.
+func (s *Store) ReleaseTableCommitLock(ctx context.Context, lock *TableCommitLock) error {
+	if lock == nil {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM table_commit_locks
+		WHERE schema_name = ? AND table_name = ? AND owner = ?
+	`, lock.Schema, lock.Table, lock.Owner)
 	return err
 }
 

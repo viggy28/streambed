@@ -105,6 +105,225 @@ func TestCOWFileLevelRewritePrunesUnaffectedFiles(t *testing.T) {
 	}
 }
 
+func TestSmallFileCompactionReducesActiveFiles(t *testing.T) {
+	w, mem := testWriter(t)
+	ctx := context.Background()
+	for i := 1; i <= 24; i++ {
+		if _, err := w.HandleEvent(ctx, insertEvent("public", "compact", pglogrepl.LSN(i), strconv.Itoa(i), fmt.Sprintf("name-%04d-xxxxxxxxxxxxxxxxxxxxxxxx", i))); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.FlushAll(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := w.catalog.GetActiveDataFiles(ctx, "public", "compact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) < 10 {
+		t.Fatalf("setup active files=%d, want many small files", len(before))
+	}
+	plan, result, err := CompactSmallFiles(ctx, w.catalog, w.state, CompactionOptions{
+		TargetFileSizeBytes:     700,
+		SmallFileThresholdBytes: 10 * 1024,
+		MaxInputFiles:           100,
+		DryRun:                  false,
+	}, "public", "compact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Aborted {
+		t.Fatalf("compaction aborted: %s", result.AbortReason)
+	}
+	if len(plan.InputFiles) != len(before) {
+		t.Fatalf("input files=%d, before=%d", len(plan.InputFiles), len(before))
+	}
+	after, err := w.catalog.GetActiveDataFiles(ctx, "public", "compact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) >= len(before) {
+		t.Fatalf("active files not reduced: before=%d after=%d", len(before), len(after))
+	}
+	cols := []pqbuilder.ColumnDef{{Name: "id", OID: 23, FieldID: 1}, {Name: "name", OID: 25, FieldID: 2}}
+	var total int
+	for _, f := range after {
+		data, err := mem.GetObject(ctx, s3KeyFromURI(w.catalog.dataFileURI(w.catalog.tablePath("public", "compact"), f)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows, err := pqbuilder.ReadRows(data, cols)
+		if err != nil {
+			t.Fatal(err)
+		}
+		total += len(rows)
+		if len(f.LowerBounds) == 0 || len(f.UpperBounds) == 0 {
+			t.Fatalf("compacted file %s missing bounds", f.Path)
+		}
+	}
+	if total != 24 {
+		t.Fatalf("rows after compaction=%d, want 24", total)
+	}
+	lsn, found, err := w.catalog.GetSnapshotFlushLSN(ctx, "public", "compact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || lsn == "" {
+		t.Fatalf("compaction did not preserve last flush LSN: found=%v lsn=%q", found, lsn)
+	}
+}
+
+func TestSmallFileCompactionCarriesConcurrentAppend(t *testing.T) {
+	w, _ := testWriter(t)
+	ctx := context.Background()
+	for i := 1; i <= 6; i++ {
+		if _, err := w.HandleEvent(ctx, insertEvent("public", "append", pglogrepl.LSN(i), strconv.Itoa(i), "old")); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.FlushAll(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan, err := w.catalog.PlanSmallFileCompaction(ctx, "public", "append", CompactionOptions{TargetFileSizeBytes: 700, SmallFileThresholdBytes: 10 * 1024, MaxInputFiles: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputs, err := w.catalog.writeCompactedDataFiles(ctx, "public", "append", plan, CompactionOptions{TargetFileSizeBytes: 700})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.HandleEvent(ctx, insertEvent("public", "append", 100, "99", "new")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := w.state.AcquireTableCommitLock(ctx, "public", "append", "test", 5*time.Minute, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := w.catalog.CommitSmallFileCompaction(ctx, "public", "append", plan, outputs)
+	_ = w.state.ReleaseTableCommitLock(ctx, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ValidatedSnapshotID == plan.PlannedSnapshotID {
+		t.Fatal("validated snapshot did not advance after concurrent append")
+	}
+	paths, err := w.catalog.GetDataFilePaths(ctx, "public", "append")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cols := []pqbuilder.ColumnDef{{Name: "id", OID: 23, FieldID: 1}, {Name: "name", OID: 25, FieldID: 2}}
+	seenNew := false
+	var total int
+	for _, p := range paths {
+		data, err := w.storage.GetObject(ctx, s3KeyFromURI(p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows, err := pqbuilder.ReadRows(data, cols)
+		if err != nil {
+			t.Fatal(err)
+		}
+		total += len(rows)
+		for _, r := range rows {
+			if string(r[0].Data) == "99" {
+				seenNew = true
+			}
+		}
+	}
+	if total != 7 || !seenNew {
+		t.Fatalf("total=%d seenNew=%v", total, seenNew)
+	}
+}
+
+func TestSmallFileCompactionAbortsWhenInputRewritten(t *testing.T) {
+	w, _ := testWriter(t)
+	ctx := context.Background()
+	for i := 1; i <= 6; i++ {
+		if _, err := w.HandleEvent(ctx, insertEvent("public", "conflict", pglogrepl.LSN(i), strconv.Itoa(i), "old")); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.FlushAll(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan, err := w.catalog.PlanSmallFileCompaction(ctx, "public", "conflict", CompactionOptions{TargetFileSizeBytes: 700, SmallFileThresholdBytes: 10 * 1024, MaxInputFiles: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputs, err := w.catalog.writeCompactedDataFiles(ctx, "public", "conflict", plan, CompactionOptions{TargetFileSizeBytes: 700})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rewrite one planned input file through COW before the compaction commit.
+	// Updating all known setup IDs guarantees at least one planned input file is
+	// replaced regardless of manifest ordering.
+	for i := 1; i <= 6; i++ {
+		id := strconv.Itoa(i)
+		if _, err := w.HandleEvent(ctx, updateEvent("public", "conflict", pglogrepl.LSN(100+i), id, id, "updated")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := w.state.AcquireTableCommitLock(ctx, "public", "conflict", "test", 5*time.Minute, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := w.catalog.CommitSmallFileCompaction(ctx, "public", "conflict", plan, outputs)
+	_ = w.state.ReleaseTableCommitLock(ctx, lock)
+	if err == nil || !result.Aborted {
+		t.Fatalf("expected abort, result=%+v err=%v", result, err)
+	}
+}
+
+func TestSmallFileCompactionSkipsActiveEqualityDeletes(t *testing.T) {
+	ctx := context.Background()
+	mem := storage.NewMemS3Client("test-bucket")
+	catalog := NewCatalog(mem, "test-bucket", "test-prefix")
+	store := testStateStore(t)
+	w := NewWriter(catalog, mem, store, "test_slot", 10000, 2*time.Second, testLogger(), WithMutationMode(MutationModeMOR))
+	if _, err := w.HandleEvent(ctx, insertEvent("public", "morcompact", 1, "1", "old")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.HandleEvent(ctx, updateEvent("public", "morcompact", 2, "1", "1", "new")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	plan, result, err := CompactSmallFiles(ctx, catalog, store, CompactionOptions{TargetFileSizeBytes: 1024, SmallFileThresholdBytes: 10 * 1024}, "public", "morcompact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.ActiveDeleteFileCount == 0 || !result.Aborted {
+		t.Fatalf("expected active deletes skip, plan=%+v result=%+v", plan, result)
+	}
+}
+
+func TestCompactionSortRowsByFieldsIsTypeAware(t *testing.T) {
+	cols := []pqbuilder.ColumnDef{{Name: "id", OID: 23, FieldID: 1}}
+	rows := [][]pqbuilder.Value{
+		{{Data: []byte("10")}},
+		{{Data: []byte("2")}},
+		{{Data: []byte("1")}},
+	}
+	sortRowsByFields(rows, cols, []int{1})
+	got := []string{string(rows[0][0].Data), string(rows[1][0].Data), string(rows[2][0].Data)}
+	want := []string{"1", "2", "10"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sorted ids=%v, want %v", got, want)
+		}
+	}
+}
+
 func TestSnapshotExpirationAndOrphanDryRun(t *testing.T) {
 	w, mem := testWriter(t)
 	ctx := context.Background()
