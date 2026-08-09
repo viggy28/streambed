@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pglogrepl"
+	"github.com/viggy28/streambed/internal/failpoint"
 	pqbuilder "github.com/viggy28/streambed/internal/parquet"
 	"github.com/viggy28/streambed/internal/state"
 	"github.com/viggy28/streambed/internal/storage"
@@ -710,8 +711,14 @@ func (w *Writer) writeDataFiles(ctx context.Context, key string, buf *tableBuffe
 		}
 		name := fmt.Sprintf("data/%s.parquet", uuid.New().String())
 		s3Key := fmt.Sprintf("%s/%s/%s/%s", w.catalog.prefix, buf.Schema, buf.Table, name)
+		if err := failpoint.Check(ctx, "before_parquet_write"); err != nil {
+			return nil, err
+		}
 		if err := w.storage.PutObject(ctx, s3Key, parquetData, "application/octet-stream"); err != nil {
 			return nil, fmt.Errorf("upload parquet for %s: %w", key, err)
+		}
+		if err := failpoint.Check(ctx, "after_parquet_write_before_metadata_commit"); err != nil {
+			return nil, err
 		}
 		lower, upper := computeKeyBounds(buf, chunk)
 		files = append(files, DataFile{Path: name, RowCount: int64(len(chunk)), FileSize: int64(len(parquetData)), LowerBounds: lower, UpperBounds: upper})

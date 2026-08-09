@@ -13,6 +13,7 @@ import (
 
 	ice "github.com/apache/iceberg-go"
 	"github.com/google/uuid"
+	"github.com/viggy28/streambed/internal/failpoint"
 	"github.com/viggy28/streambed/internal/storage"
 	"github.com/viggy28/streambed/internal/wal"
 )
@@ -644,6 +645,9 @@ func (c *Catalog) CommitChangesetFiles(
 			entries = append(entries, dataManifestEntry{FilePath: c.dataFileURI(basePath, f), File: f})
 		}
 		if len(entries) > 0 {
+			if err := failpoint.Check(ctx, "before_manifest_write"); err != nil {
+				return err
+			}
 			manifestBytes, mf, err := writeDataManifestAvro(manifestS3Path, iceSchema, snapID, seqNum, entries)
 			if err != nil {
 				return fmt.Errorf("write data manifest avro: %w", err)
@@ -761,10 +765,16 @@ func (c *Catalog) CommitChangesetFiles(
 		return fmt.Errorf("marshal new metadata: %w", err)
 	}
 	newMetaKey := path.Join(basePath, "metadata", fmt.Sprintf("v%d.metadata.json", newVersion))
+	if err := failpoint.Check(ctx, "before_metadata_commit"); err != nil {
+		return err
+	}
 	if err := c.storage.PutObject(ctx, newMetaKey, newMetadataJSON, "application/json"); err != nil {
 		return err
 	}
-	return c.storage.PutObject(ctx, hintKey, []byte(strconv.Itoa(newVersion)), "text/plain")
+	if err := c.storage.PutObject(ctx, hintKey, []byte(strconv.Itoa(newVersion)), "text/plain"); err != nil {
+		return err
+	}
+	return failpoint.Check(ctx, "after_metadata_commit_before_state_or_ack")
 }
 
 func (c *Catalog) dataFileURI(basePath string, f DataFile) string {
@@ -832,10 +842,16 @@ func (c *Catalog) commitEmptyTable(ctx context.Context, schema, table, flushLSN 
 	}
 
 	newMetaKey := path.Join(basePath, "metadata", fmt.Sprintf("v%d.metadata.json", newVersion))
+	if err := failpoint.Check(ctx, "before_metadata_commit"); err != nil {
+		return err
+	}
 	if err := c.storage.PutObject(ctx, newMetaKey, newMetadataJSON, "application/json"); err != nil {
 		return err
 	}
-	return c.storage.PutObject(ctx, hintKey, []byte(strconv.Itoa(newVersion)), "text/plain")
+	if err := c.storage.PutObject(ctx, hintKey, []byte(strconv.Itoa(newVersion)), "text/plain"); err != nil {
+		return err
+	}
+	return failpoint.Check(ctx, "after_metadata_commit_before_state_or_ack")
 }
 
 // GetSnapshotFlushLSN reads the streambed.last_flush_lsn from the current
