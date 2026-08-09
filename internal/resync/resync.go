@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -131,6 +132,14 @@ func Run(ctx context.Context, opts Options) (Stats, error) {
 		if len(batch) == 0 {
 			return nil
 		}
+		var lock *state.TableCommitLock
+		if opts.State != nil {
+			lock, err = opts.State.AcquireTableCommitLock(ctx, opts.Schema, opts.Table, "resync", 5*time.Minute, 30*time.Second)
+			if err != nil {
+				return fmt.Errorf("acquire commit lock: %w", err)
+			}
+			defer opts.State.ReleaseTableCommitLock(context.Background(), lock)
+		}
 		if !tableCreated {
 			exists, err := opts.Catalog.TableExists(ctx, opts.Schema, opts.Table)
 			if err != nil {
@@ -153,6 +162,15 @@ func Run(ctx context.Context, opts Options) (Stats, error) {
 
 		if err := opts.S3.PutObject(ctx, s3Key, parquetData, "application/octet-stream"); err != nil {
 			return fmt.Errorf("upload parquet: %w", err)
+		}
+		if lock != nil {
+			ok, err := opts.State.RefreshTableCommitLock(ctx, lock, 5*time.Minute)
+			if err != nil {
+				return fmt.Errorf("refresh commit lock: %w", err)
+			}
+			if !ok {
+				return fmt.Errorf("commit lock expired or was stolen")
+			}
 		}
 		if err := opts.Catalog.CommitSnapshot(ctx, opts.Schema, opts.Table, iceberg.DataFile{
 			Path:     dataFileName,
