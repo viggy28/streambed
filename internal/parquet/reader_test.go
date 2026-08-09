@@ -6,8 +6,8 @@ import (
 
 // TestReadRowsExtendedTypes verifies the ReadRows round-trip for types
 // not covered by TestReadRowsAllTypes: uuid, json, jsonb, numeric, bytea.
-// These all go through the default string path in both parseValue and
-// goValueToText, but exercising them catches regressions in type dispatch.
+// UUID and bytea use their native Parquet encodings; the rest go through
+// the default string path. Exercising them catches regressions in type dispatch.
 func TestReadRowsExtendedTypes(t *testing.T) {
 	cols := []ColumnDef{
 		{Name: "u", OID: 2950},  // uuid
@@ -50,10 +50,10 @@ func TestReadRowsExtendedTypes(t *testing.T) {
 func TestReadRowsBoundaryValues(t *testing.T) {
 	t.Run("epoch and zero values", func(t *testing.T) {
 		cols := []ColumnDef{
-			{Name: "d", OID: 1082},  // date
-			{Name: "i8", OID: 20},   // int8
-			{Name: "f8", OID: 701},  // float8
-			{Name: "s", OID: 25},    // text
+			{Name: "d", OID: 1082}, // date
+			{Name: "i8", OID: 20},  // int8
+			{Name: "f8", OID: 701}, // float8
+			{Name: "s", OID: 25},   // text
 		}
 		rows := [][]Value{{
 			val("1970-01-01"),
