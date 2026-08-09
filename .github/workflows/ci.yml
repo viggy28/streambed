@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -25,7 +28,8 @@ jobs:
       - name: Unit tests
         run: go test -race ./internal/... ./config/...
 
-  integration-test:
+  integration-smoke:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,8 +43,55 @@ jobs:
           docker compose -f test/integration/docker-compose.yml up -d postgres minio --wait
           docker compose -f test/integration/docker-compose.yml up createbucket
 
-      - name: Integration tests
-        run: go test -tags integration -short -v -timeout 900s ./test/integration/...
+      - name: Integration smoke tests
+        run: >
+          go test -tags integration -short -v -timeout 8m
+          -run 'TestEndToEnd$|TestEndToEndUpdateDelete$|TestSchemaEvolution_AddColumn$|TestMutationModesDuckDBCorrectness/cow$'
+          ./test/integration
+
+      - name: Stop services
+        if: always()
+        run: docker compose -f test/integration/docker-compose.yml down -v
+
+  integration-full:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Start services
+        run: |
+          docker compose -f test/integration/docker-compose.yml up -d postgres minio --wait
+          docker compose -f test/integration/docker-compose.yml up createbucket
+
+      - name: Full integration tests
+        run: go test -tags integration -short -v -timeout 30m ./test/integration/...
+
+      - name: Stop services
+        if: always()
+        run: docker compose -f test/integration/docker-compose.yml down -v
+
+  integration-expensive:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Start services
+        run: |
+          docker compose -f test/integration/docker-compose.yml up -d postgres minio --wait
+          docker compose -f test/integration/docker-compose.yml up createbucket
+
+      - name: Expensive integration tests
+        run: go test -tags integration -v -timeout 60m ./test/integration/...
 
       - name: Stop services
         if: always()
