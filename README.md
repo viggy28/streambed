@@ -41,6 +41,8 @@ psql -h localhost -p 5433 -U postgres -d postgres
 
 Run `streambed sync --help` for all configuration options. All flags support environment variables with `STREAMBED_` prefix (e.g. `STREAMBED_SOURCE_URL`). UPDATE/DELETE use copy-on-write by default; opt into Iceberg v2 equality deletes with `--mutation-mode=mor` (or `STREAMBED_MUTATION_MODE=mor`) after verifying reader compatibility. Once a table has active equality deletes, Streambed fails startup in COW mode; continue using MOR.
 
+Use `--target-file-size-mb` (or `STREAMBED_TARGET_FILE_SIZE_MB`) to split large flushes into approximately target-sized Parquet data files. The default is 128 MiB. This is a target, not a hard maximum; small flushes still create small files.
+
 ## Architecture
 
 ![Architecture](/docs/architecture.svg)
@@ -66,7 +68,11 @@ A query server exposes Iceberg tables over the Postgres wire protocol using embe
 | `streambed resync --table=public.users` | One-shot backfill via `COPY` under a consistent snapshot. |
 | `streambed query` | Standalone query server (no sync). Points at existing Iceberg tables. |
 | `streambed cleanup --table=public.users` | Deletes S3 objects and state for a table. Useful before `resync`. |
+| `streambed maintenance --table=public.users` | Expires old Iceberg snapshots and can dry-run orphan planning. |
+| `streambed maintenance compact --table=public.users` | Compacts many small active data files into fewer target-sized files. |
 
+
+See [docs/maintenance.md](docs/maintenance.md) for snapshot expiration and small-file compaction details.
 
 ## Development
 
