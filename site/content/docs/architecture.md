@@ -1,7 +1,7 @@
 ---
 title: Architecture
-weight: 4
-prev: /docs/configuration
+weight: 5
+prev: /docs/maintenance
 ---
 
 ## Overview

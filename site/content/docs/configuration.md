@@ -1,7 +1,7 @@
 ---
 title: Configuration
 weight: 3
-next: /docs/architecture
+next: /docs/maintenance
 prev: /docs/commands
 ---
 
