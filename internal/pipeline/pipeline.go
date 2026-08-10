@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/viggy28/streambed/internal/failpoint"
 	"github.com/viggy28/streambed/internal/iceberg"
 	"github.com/viggy28/streambed/internal/state"
 	"github.com/viggy28/streambed/internal/wal"
@@ -415,6 +416,9 @@ func computeAck(receivedLSN, pendingMinLSN pglogrepl.LSN) pglogrepl.LSN {
 func (p *Pipeline) sendStandby(ctx context.Context, receivedLSN pglogrepl.LSN) error {
 	pendingMinLSN := p.writer.ComputePendingMinLSN()
 	ack := computeAck(receivedLSN, pendingMinLSN)
+	if err := failpoint.Check(ctx, "before_standby_status_update"); err != nil {
+		return err
+	}
 	err := pglogrepl.SendStandbyStatusUpdate(ctx, p.conn,
 		pglogrepl.StandbyStatusUpdate{
 			WALWritePosition: ack,
