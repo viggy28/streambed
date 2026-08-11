@@ -233,7 +233,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 					return rel, false
 				}
 				if filterLSN, hasFilter := backfillFilters[key]; hasFilter {
-					if xld.WALStart <= filterLSN {
+					if shouldDropBackfillOverlap(xld.WALStart, filterLSN) {
 						p.logger.Debug("dropping backfill-overlap event",
 							"table", key,
 							"event_lsn", xld.WALStart,
@@ -250,6 +250,10 @@ func (p *Pipeline) Run(ctx context.Context) error {
 							"at_lsn", xld.WALStart,
 						)
 					}
+					// The first event at/after the backfill boundary is not covered by
+					// the COPY snapshot. Process it even when the resync snapshot stored
+					// the same LSN in Iceberg's last_flush_lsn summary.
+					return rel, true
 				}
 				if storeLsn := tableFlushLSN[key]; storeLsn >= xld.WALStart {
 					return rel, false
@@ -407,6 +411,16 @@ func computeAck(receivedLSN, pendingMinLSN pglogrepl.LSN) pglogrepl.LSN {
 		return hold
 	}
 	return receivedLSN
+}
+
+// shouldDropBackfillOverlap reports whether a main-slot WAL event is known to
+// be covered by the exported-snapshot COPY used by resync. Events strictly
+// before the snapshot's consistent point are already represented in the COPY.
+// Events at exactly the consistent point must be replayed: nightly integration
+// caught that PostgreSQL can emit the first post-snapshot row with
+// WALStart == consistent_point.
+func shouldDropBackfillOverlap(eventLSN, filterLSN pglogrepl.LSN) bool {
+	return eventLSN < filterLSN
 }
 
 // sendStandby computes the safe ack position and sends a standby status

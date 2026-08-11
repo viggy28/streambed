@@ -21,6 +21,7 @@ func TestPgbenchQueryLatency(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping pgbench benchmark in short mode")
 	}
+	skipUnlessPerformanceTests(t)
 	skipIfNotAvailable(t)
 	ctx := context.Background()
 

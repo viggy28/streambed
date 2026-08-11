@@ -61,6 +61,26 @@ func TestCollectAddColumns(t *testing.T) {
 	}
 }
 
+func TestShouldDropBackfillOverlap(t *testing.T) {
+	filter := pglogrepl.LSN(1000)
+	tests := []struct {
+		name  string
+		event pglogrepl.LSN
+		want  bool
+	}{
+		{name: "before snapshot boundary drops", event: 999, want: true},
+		{name: "at snapshot boundary replays", event: 1000, want: false},
+		{name: "after snapshot boundary replays", event: 1001, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldDropBackfillOverlap(tt.event, filter); got != tt.want {
+				t.Fatalf("shouldDropBackfillOverlap(%s, %s) = %v, want %v", tt.event, filter, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestComputeAck(t *testing.T) {
 	tests := []struct {
 		name          string

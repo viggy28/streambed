@@ -73,7 +73,9 @@ type TempSlotWithSnapshot struct {
 	// ConsistentPoint is the WAL LSN at which the snapshot was exported.
 	// Any WAL record at or before this LSN is already reflected in the
 	// snapshot — the consumer should drop main-slot events with WAL
-	// position ≤ ConsistentPoint to avoid duplicating backfilled rows.
+	// positions strictly before ConsistentPoint to avoid duplicating
+	// backfilled rows. Events at ConsistentPoint are replayed because they
+	// may be the first changes not visible in the exported snapshot.
 	ConsistentPoint pglogrepl.LSN
 }
 
