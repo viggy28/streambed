@@ -412,6 +412,7 @@ func TestInsertThroughput(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping throughput benchmark in short mode")
 	}
+	skipUnlessPerformanceTests(t)
 	skipIfNotAvailable(t)
 
 	configs := []benchConfig{
@@ -504,6 +505,7 @@ func TestInsertThroughputByShape(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping shape benchmark in short mode")
 	}
+	skipUnlessPerformanceTests(t)
 	skipIfNotAvailable(t)
 
 	const rowCount = 1_000_000
@@ -654,6 +656,7 @@ func TestUpdateThroughputByShape(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping update shape benchmark in short mode")
 	}
+	skipUnlessPerformanceTests(t)
 	skipIfNotAvailable(t)
 
 	const rowCount = 1_000_000

@@ -57,7 +57,10 @@ func TestSnapshotToCDCHandoff_NoGapNoDuplicate(t *testing.T) {
 	assertBackfillFilterCleared(t, sharedStatePath, "public."+table)
 
 	duckDB := newTestDuckDB(t)
-	assertPgIcebergMatch(t, duckDB, "public", table, []string{"id"}, nil)
+	// Validate the stable value columns. Timestamp rendering differs between
+	// Postgres text output and DuckDB's Iceberg scan, and is covered by the
+	// dedicated type-roundtrip tests.
+	assertPgIcebergMatch(t, duckDB, "public", table, []string{"id"}, []string{"id", "name"})
 }
 
 func runResyncForIntegration(t *testing.T, ctx context.Context, table, statePath string, flushRows int) resyncpkg.Stats {

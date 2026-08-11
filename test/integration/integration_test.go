@@ -99,6 +99,13 @@ func newTestDuckDB(t *testing.T) *sql.DB {
 	return duckDB
 }
 
+func skipUnlessPerformanceTests(t *testing.T) {
+	t.Helper()
+	if os.Getenv("STREAMBED_RUN_PERF_TESTS") != "1" {
+		t.Skip("set STREAMBED_RUN_PERF_TESTS=1 to run performance/throughput tests")
+	}
+}
+
 func skipIfNotAvailable(t *testing.T) {
 	t.Helper()
 	// Check Postgres
@@ -1782,6 +1789,7 @@ func TestQueryLatencyComparison(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping benchmark test in short mode")
 	}
+	skipUnlessPerformanceTests(t)
 	skipIfNotAvailable(t)
 	ctx := context.Background()
 
@@ -1896,6 +1904,7 @@ func TestBulkIngestThroughput(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping benchmark test in short mode")
 	}
+	skipUnlessPerformanceTests(t)
 	skipIfNotAvailable(t)
 	ctx := context.Background()
 
