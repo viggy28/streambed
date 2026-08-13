@@ -32,6 +32,12 @@ func TestDefaults(t *testing.T) {
 	if cfg.MutationMode != "cow" {
 		t.Errorf("expected MutationMode 'cow', got %q", cfg.MutationMode)
 	}
+	if cfg.TargetFormat != "iceberg" {
+		t.Errorf("expected TargetFormat 'iceberg', got %q", cfg.TargetFormat)
+	}
+	if cfg.DuckLakeCatalog == "" {
+		t.Error("expected DuckLakeCatalog default")
+	}
 }
 
 func TestLoadFromEnv(t *testing.T) {
@@ -44,6 +50,9 @@ func TestLoadFromEnv(t *testing.T) {
 	os.Setenv("STREAMBED_INCLUDE_TABLES", "public.orders, public.users")
 	os.Setenv("STREAMBED_LOG_LEVEL", "debug")
 	os.Setenv("STREAMBED_MUTATION_MODE", "mor")
+	os.Setenv("STREAMBED_TARGET_FORMAT", "ducklake")
+	os.Setenv("STREAMBED_DUCKLAKE_CATALOG", "/tmp/streambed-ducklake.sqlite")
+	os.Setenv("STREAMBED_DUCKLAKE_DATA_PATH", "s3://my-bucket/data/ducklake")
 	defer func() {
 		os.Unsetenv("STREAMBED_SOURCE_URL")
 		os.Unsetenv("STREAMBED_S3_BUCKET")
@@ -54,6 +63,9 @@ func TestLoadFromEnv(t *testing.T) {
 		os.Unsetenv("STREAMBED_INCLUDE_TABLES")
 		os.Unsetenv("STREAMBED_LOG_LEVEL")
 		os.Unsetenv("STREAMBED_MUTATION_MODE")
+		os.Unsetenv("STREAMBED_TARGET_FORMAT")
+		os.Unsetenv("STREAMBED_DUCKLAKE_CATALOG")
+		os.Unsetenv("STREAMBED_DUCKLAKE_DATA_PATH")
 	}()
 
 	cfg := Load()
@@ -84,6 +96,15 @@ func TestLoadFromEnv(t *testing.T) {
 	if cfg.MutationMode != "mor" {
 		t.Errorf("expected MutationMode 'mor', got %q", cfg.MutationMode)
 	}
+	if cfg.TargetFormat != "ducklake" {
+		t.Errorf("expected TargetFormat 'ducklake', got %q", cfg.TargetFormat)
+	}
+	if cfg.DuckLakeCatalog != "/tmp/streambed-ducklake.sqlite" {
+		t.Errorf("expected DuckLakeCatalog from env, got %q", cfg.DuckLakeCatalog)
+	}
+	if got := cfg.EffectiveDuckLakeDataPath(); got != "s3://my-bucket/data/ducklake/" {
+		t.Errorf("expected normalized DuckLake data path, got %q", got)
+	}
 }
 
 func TestValidate(t *testing.T) {
@@ -100,6 +121,11 @@ func TestValidate(t *testing.T) {
 		}, "cannot use both"},
 		{"invalid mutation mode", func(c *Config) { c.MutationMode = "invalid" }, "mutation-mode must be one of"},
 		{"mor mutation mode", func(c *Config) { c.MutationMode = "mor" }, ""},
+		{"invalid target format", func(c *Config) { c.TargetFormat = "delta" }, "target-format must be one of"},
+		{"ducklake missing catalog", func(c *Config) {
+			c.TargetFormat = "ducklake"
+			c.DuckLakeCatalog = ""
+		}, "ducklake-catalog is required"},
 		{"valid config", func(c *Config) {}, ""},
 	}
 
@@ -111,6 +137,8 @@ func TestValidate(t *testing.T) {
 				FlushRows:        10000,
 				FlushInterval:    30 * time.Second,
 				TargetFileSizeMB: 128,
+				TargetFormat:     "iceberg",
+				DuckLakeCatalog:  "/tmp/ducklake.sqlite",
 				MutationMode:     "cow",
 			}
 			tt.modify(cfg)
