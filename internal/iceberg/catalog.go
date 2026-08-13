@@ -709,6 +709,7 @@ func (c *Catalog) CommitChangesetFiles(
 	}
 
 	newVersion := currentVersion + 1
+	previousTotal, previousTotalExact := currentSnapshotTotalRecords(metadata)
 	metadata.LastSequenceNumber = seqNum
 	metadata.LastUpdatedMS = time.Now().UnixMilli()
 	metadata.CurrentSnapshotID = snapID
@@ -748,10 +749,8 @@ func (c *Catalog) CommitChangesetFiles(
 	}
 	if replace {
 		summary["total-records"] = strconv.FormatInt(totalRows, 10)
-	} else if len(eqDeleteFiles) == 0 && !hasEqualityDeletes(metadata.Snapshots) {
-		if currentTotal, exact := currentSnapshotTotalRecords(metadata); exact {
-			summary["total-records"] = strconv.FormatInt(currentTotal+addedRows, 10)
-		}
+	} else if len(eqDeleteFiles) == 0 && !hasEqualityDeletes(metadata.Snapshots) && previousTotalExact {
+		summary["total-records"] = strconv.FormatInt(previousTotal+addedRows, 10)
 	}
 
 	newSnapshot := snapshot{SnapshotID: snapID, SequenceNumber: seqNum, TimestampMS: time.Now().UnixMilli(), ManifestList: fmt.Sprintf("s3://%s/%s", c.bucket, manifestListKey), Summary: summary}

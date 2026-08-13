@@ -129,6 +129,41 @@ func TestCurrentSnapshotTotalRecordsUnknown(t *testing.T) {
 	}
 }
 
+func TestAppendSnapshotsPublishExactTotalRecords(t *testing.T) {
+	ctx := context.Background()
+	mem := storage.NewMemS3Client("test-bucket")
+	catalog := NewCatalog(mem, "test-bucket", "test")
+
+	if _, err := catalog.CreateTable(ctx, "public", "events", []ColumnDef{{Name: "id", OID: 23}}); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if err := catalog.CommitSnapshot(ctx, "public", "events", DataFile{Path: "data/1.parquet", RowCount: 10, FileSize: 100}, "0/10"); err != nil {
+		t.Fatalf("commit first snapshot: %v", err)
+	}
+	if err := catalog.CommitSnapshot(ctx, "public", "events", DataFile{Path: "data/2.parquet", RowCount: 10, FileSize: 100}, "0/20"); err != nil {
+		t.Fatalf("commit second snapshot: %v", err)
+	}
+
+	hint, err := mem.GetObject(ctx, "test/public/events/metadata/version-hint.text")
+	if err != nil {
+		t.Fatalf("read version hint: %v", err)
+	}
+	metadataJSON, err := mem.GetObject(ctx, "test/public/events/metadata/v"+string(hint)+".metadata.json")
+	if err != nil {
+		t.Fatalf("read latest metadata: %v", err)
+	}
+	var metadata tableMetadata
+	if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+		t.Fatalf("parse metadata: %v", err)
+	}
+	if got := metadata.Snapshots[0].Summary["total-records"]; got != "10" {
+		t.Fatalf("first snapshot total-records = %q, want 10", got)
+	}
+	if got := metadata.Snapshots[1].Summary["total-records"]; got != "20" {
+		t.Fatalf("second snapshot total-records = %q, want 20", got)
+	}
+}
+
 func TestEqualityDeleteHistoryOmitsUnknownTotalRecords(t *testing.T) {
 	snapshots := []snapshot{
 		{Summary: map[string]string{"added-records": "10", "total-records": "10"}},
