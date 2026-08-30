@@ -1,0 +1,382 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "timestamp_utc": "2026-08-29T08:21:00Z",
+    "git_commit": "5ecbfb40e04cab78a43f7d3591479ccb203b6db5",
+    "git_dirty": true,
+    "go_version": "go1.26.1",
+    "os": "darwin",
+    "arch": "arm64",
+    "repetitions": 1,
+    "query_runs": 7
+  },
+  "query_runs": 7,
+  "results": [
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "append",
+        "baseline_rows": 1000000,
+        "insert_rows": 100000,
+        "update_rows": 0,
+        "delete_rows": 0,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 1189,
+      "write_duration_ms": 6630,
+      "flush_count": 1000,
+      "final_rows": 1100000,
+      "data_objects": 1005,
+      "delete_objects": 0,
+      "total_objects": 1005,
+      "total_object_bytes": 14672929,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 21,
+          "p95_ms": 24
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 5,
+          "p95_ms": 6
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 4,
+          "p95_ms": 4
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 30,
+          "p95_ms": 32
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "append",
+        "baseline_rows": 1000000,
+        "insert_rows": 100000,
+        "update_rows": 0,
+        "delete_rows": 0,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 1141,
+      "write_duration_ms": 5597,
+      "flush_count": 1000,
+      "final_rows": 1100000,
+      "data_objects": 1005,
+      "delete_objects": 0,
+      "total_objects": 1005,
+      "total_object_bytes": 14669822,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 19,
+          "p95_ms": 23
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 2,
+          "p95_ms": 3
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 2,
+          "p95_ms": 2
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 28,
+          "p95_ms": 30
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "update-10pct",
+        "baseline_rows": 1000000,
+        "insert_rows": 0,
+        "update_rows": 100000,
+        "delete_rows": 0,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 1191,
+      "write_duration_ms": 103336,
+      "flush_count": 2000,
+      "final_rows": 1000000,
+      "data_objects": 4005,
+      "delete_objects": 2000,
+      "total_objects": 4005,
+      "total_object_bytes": 438854392,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 44,
+          "p95_ms": 45
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 6,
+          "p95_ms": 7
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 6,
+          "p95_ms": 6
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 64,
+          "p95_ms": 71
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "update-10pct",
+        "baseline_rows": 1000000,
+        "insert_rows": 0,
+        "update_rows": 100000,
+        "delete_rows": 0,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 1164,
+      "write_duration_ms": 97904,
+      "flush_count": 2000,
+      "final_rows": 1000000,
+      "data_objects": 4005,
+      "delete_objects": 2000,
+      "total_objects": 4005,
+      "total_object_bytes": 438677101,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 38,
+          "p95_ms": 41
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 3,
+          "p95_ms": 4
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 3,
+          "p95_ms": 3
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 70,
+          "p95_ms": 77
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "delete-10pct",
+        "baseline_rows": 1000000,
+        "insert_rows": 0,
+        "update_rows": 0,
+        "delete_rows": 100000,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 1181,
+      "write_duration_ms": 29966,
+      "flush_count": 1000,
+      "final_rows": 900000,
+      "data_objects": 1005,
+      "delete_objects": 1005,
+      "total_objects": 1005,
+      "total_object_bytes": 220032774,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 14,
+          "p95_ms": 17
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 4,
+          "p95_ms": 4
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 3,
+          "p95_ms": 4
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 22,
+          "p95_ms": 31
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "delete-10pct",
+        "baseline_rows": 1000000,
+        "insert_rows": 0,
+        "update_rows": 0,
+        "delete_rows": 100000,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 1160,
+      "write_duration_ms": 26780,
+      "flush_count": 1000,
+      "final_rows": 900000,
+      "data_objects": 1005,
+      "delete_objects": 1005,
+      "total_objects": 1005,
+      "total_object_bytes": 220104027,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 13,
+          "p95_ms": 14
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 2,
+          "p95_ms": 3
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 2,
+          "p95_ms": 2
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 21,
+          "p95_ms": 23
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "mixed-append-update-delete",
+        "baseline_rows": 1000000,
+        "insert_rows": 100000,
+        "update_rows": 100000,
+        "delete_rows": 100000,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 1160,
+      "write_duration_ms": 205288,
+      "flush_count": 4000,
+      "final_rows": 1000000,
+      "data_objects": 6005,
+      "delete_objects": 6005,
+      "total_objects": 6005,
+      "total_object_bytes": 1068436356,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 59,
+          "p95_ms": 73
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 7,
+          "p95_ms": 8
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 7,
+          "p95_ms": 7
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 99,
+          "p95_ms": 110
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "mixed-append-update-delete",
+        "baseline_rows": 1000000,
+        "insert_rows": 100000,
+        "update_rows": 100000,
+        "delete_rows": 100000,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 1188,
+      "write_duration_ms": 196791,
+      "flush_count": 4000,
+      "final_rows": 1000000,
+      "data_objects": 6005,
+      "delete_objects": 6005,
+      "total_objects": 6005,
+      "total_object_bytes": 1068912340,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 58,
+          "p95_ms": 264
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 3,
+          "p95_ms": 4
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 3,
+          "p95_ms": 3
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 97,
+          "p95_ms": 99
+        }
+      ]
+    }
+  ],
+  "caveats": [
+    "This benchmark bypasses Postgres logical replication and exercises writer + catalog commit + DuckDB reads only.",
+    "Baseline load is performed as one bulk flush and reported separately; write_duration_ms measures only the scenario workload at the configured flush_rows.",
+    "Iceberg and DuckLake write data to local MinIO; DuckLake catalog is local SQLite or DuckDB as configured.",
+    "Read timings include DuckDB query execution over the produced lake but do not include psql-wire server overhead."
+  ]
+}

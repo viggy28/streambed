@@ -1,0 +1,2182 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "timestamp_utc": "2026-08-29T05:41:25Z",
+    "git_commit": "5ecbfb40e04cab78a43f7d3591479ccb203b6db5",
+    "git_dirty": true,
+    "go_version": "go1.26.1",
+    "os": "darwin",
+    "arch": "arm64",
+    "repetitions": 1,
+    "query_runs": 7
+  },
+  "query_runs": 7,
+  "results": [
+    {
+      "target": {
+        "name": "iceberg-cow",
+        "format": "iceberg",
+        "iceberg_mutation": "cow"
+      },
+      "scenario": {
+        "name": "append",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 0,
+        "delete_rows": 0,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 182,
+      "write_duration_ms": 1731,
+      "flush_count": 100,
+      "final_rows": 110000,
+      "data_objects": 101,
+      "delete_objects": 0,
+      "total_objects": 406,
+      "total_object_bytes": 6670643,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 27,
+          "p95_ms": 29
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 24,
+          "p95_ms": 26
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 26,
+          "p95_ms": 30
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 26,
+          "p95_ms": 33
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "append",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 0,
+        "delete_rows": 0,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 142,
+      "write_duration_ms": 770,
+      "flush_count": 100,
+      "final_rows": 110000,
+      "data_objects": 101,
+      "delete_objects": 0,
+      "total_objects": 101,
+      "total_object_bytes": 1468592,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 6,
+          "p95_ms": 6
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 4,
+          "p95_ms": 4
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 4,
+          "p95_ms": 4
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 8,
+          "p95_ms": 10
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "append",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 0,
+        "delete_rows": 0,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 125,
+      "write_duration_ms": 542,
+      "flush_count": 100,
+      "final_rows": 110000,
+      "data_objects": 101,
+      "delete_objects": 0,
+      "total_objects": 101,
+      "total_object_bytes": 1468009,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 4,
+          "p95_ms": 4
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 2,
+          "p95_ms": 2
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 2,
+          "p95_ms": 2
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 5,
+          "p95_ms": 6
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "iceberg-cow",
+        "format": "iceberg",
+        "iceberg_mutation": "cow"
+      },
+      "scenario": {
+        "name": "update-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 10000,
+        "delete_rows": 0,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 153,
+      "write_duration_ms": 34334,
+      "flush_count": 200,
+      "final_rows": 100000,
+      "data_objects": 201,
+      "delete_objects": 0,
+      "total_objects": 806,
+      "total_object_bytes": 285538751,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 10,
+          "p95_ms": 11
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 7,
+          "p95_ms": 9
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 7,
+          "p95_ms": 9
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 10,
+          "p95_ms": 12
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "update-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 10000,
+        "delete_rows": 0,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 141,
+      "write_duration_ms": 4074,
+      "flush_count": 200,
+      "final_rows": 100000,
+      "data_objects": 401,
+      "delete_objects": 200,
+      "total_objects": 401,
+      "total_object_bytes": 6155804,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 11,
+          "p95_ms": 13
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 7,
+          "p95_ms": 7
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 7,
+          "p95_ms": 10
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 17,
+          "p95_ms": 21
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "update-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 10000,
+        "delete_rows": 0,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 127,
+      "write_duration_ms": 3798,
+      "flush_count": 200,
+      "final_rows": 100000,
+      "data_objects": 401,
+      "delete_objects": 200,
+      "total_objects": 401,
+      "total_object_bytes": 6164277,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 9,
+          "p95_ms": 11
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 5,
+          "p95_ms": 11
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 5,
+          "p95_ms": 6
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 14,
+          "p95_ms": 16
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "iceberg-cow",
+        "format": "iceberg",
+        "iceberg_mutation": "cow"
+      },
+      "scenario": {
+        "name": "delete-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 0,
+        "delete_rows": 10000,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 167,
+      "write_duration_ms": 16420,
+      "flush_count": 100,
+      "final_rows": 90000,
+      "data_objects": 101,
+      "delete_objects": 406,
+      "total_objects": 406,
+      "total_object_bytes": 132475493,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 10,
+          "p95_ms": 11
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 8,
+          "p95_ms": 10
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 9,
+          "p95_ms": 10
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 12,
+          "p95_ms": 13
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "delete-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 0,
+        "delete_rows": 10000,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 142,
+      "write_duration_ms": 1502,
+      "flush_count": 100,
+      "final_rows": 90000,
+      "data_objects": 101,
+      "delete_objects": 101,
+      "total_objects": 101,
+      "total_object_bytes": 3483707,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 8,
+          "p95_ms": 10
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 8,
+          "p95_ms": 8
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 7,
+          "p95_ms": 10
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 14,
+          "p95_ms": 16
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "delete-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 0,
+        "delete_rows": 10000,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 127,
+      "write_duration_ms": 1153,
+      "flush_count": 100,
+      "final_rows": 90000,
+      "data_objects": 101,
+      "delete_objects": 101,
+      "total_objects": 101,
+      "total_object_bytes": 3484849,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 8,
+          "p95_ms": 9
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 5,
+          "p95_ms": 7
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 5,
+          "p95_ms": 6
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 11,
+          "p95_ms": 12
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "iceberg-cow",
+        "format": "iceberg",
+        "iceberg_mutation": "cow"
+      },
+      "scenario": {
+        "name": "mixed-append-update-delete",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 10000,
+        "delete_rows": 10000,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 150,
+      "write_duration_ms": 53381,
+      "flush_count": 400,
+      "final_rows": 100000,
+      "data_objects": 401,
+      "delete_objects": 1606,
+      "total_objects": 1606,
+      "total_object_bytes": 467472451,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 29,
+          "p95_ms": 32
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 25,
+          "p95_ms": 27
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 29,
+          "p95_ms": 31
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 29,
+          "p95_ms": 31
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "mixed-append-update-delete",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 10000,
+        "delete_rows": 10000,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 137,
+      "write_duration_ms": 6991,
+      "flush_count": 400,
+      "final_rows": 100000,
+      "data_objects": 601,
+      "delete_objects": 601,
+      "total_objects": 601,
+      "total_object_bytes": 12670867,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 13,
+          "p95_ms": 14
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 7,
+          "p95_ms": 8
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 8,
+          "p95_ms": 10
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 18,
+          "p95_ms": 18
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "mixed-append-update-delete",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 10000,
+        "delete_rows": 10000,
+        "flush_rows": 100
+      },
+      "baseline_load_duration_ms": 133,
+      "write_duration_ms": 6255,
+      "flush_count": 400,
+      "final_rows": 100000,
+      "data_objects": 601,
+      "delete_objects": 601,
+      "total_objects": 601,
+      "total_object_bytes": 12711821,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 12,
+          "p95_ms": 12
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 7,
+          "p95_ms": 9
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 6,
+          "p95_ms": 7
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 15,
+          "p95_ms": 15
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "iceberg-cow",
+        "format": "iceberg",
+        "iceberg_mutation": "cow"
+      },
+      "scenario": {
+        "name": "append",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 0,
+        "delete_rows": 0,
+        "flush_rows": 500
+      },
+      "baseline_load_duration_ms": 165,
+      "write_duration_ms": 236,
+      "flush_count": 20,
+      "final_rows": 110000,
+      "data_objects": 21,
+      "delete_objects": 0,
+      "total_objects": 86,
+      "total_object_bytes": 1839278,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 13,
+          "p95_ms": 14
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 9,
+          "p95_ms": 10
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 10,
+          "p95_ms": 18
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 9,
+          "p95_ms": 11
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "append",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 0,
+        "delete_rows": 0,
+        "flush_rows": 500
+      },
+      "baseline_load_duration_ms": 135,
+      "write_duration_ms": 189,
+      "flush_count": 20,
+      "final_rows": 110000,
+      "data_objects": 21,
+      "delete_objects": 0,
+      "total_objects": 21,
+      "total_object_bytes": 1408602,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 5,
+          "p95_ms": 8
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 3,
+          "p95_ms": 4
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 4,
+          "p95_ms": 5
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 6,
+          "p95_ms": 7
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "append",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 0,
+        "delete_rows": 0,
+        "flush_rows": 500
+      },
+      "baseline_load_duration_ms": 134,
+      "write_duration_ms": 151,
+      "flush_count": 20,
+      "final_rows": 110000,
+      "data_objects": 21,
+      "delete_objects": 0,
+      "total_objects": 21,
+      "total_object_bytes": 1410838,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 4,
+          "p95_ms": 5
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 2,
+          "p95_ms": 3
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 2,
+          "p95_ms": 2
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 4,
+          "p95_ms": 4
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "iceberg-cow",
+        "format": "iceberg",
+        "iceberg_mutation": "cow"
+      },
+      "scenario": {
+        "name": "update-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 10000,
+        "delete_rows": 0,
+        "flush_rows": 500
+      },
+      "baseline_load_duration_ms": 167,
+      "write_duration_ms": 6753,
+      "flush_count": 40,
+      "final_rows": 100000,
+      "data_objects": 41,
+      "delete_objects": 0,
+      "total_objects": 166,
+      "total_object_bytes": 55420003,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 9,
+          "p95_ms": 10
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 7,
+          "p95_ms": 8
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 7,
+          "p95_ms": 10
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 10,
+          "p95_ms": 11
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "update-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 10000,
+        "delete_rows": 0,
+        "flush_rows": 500
+      },
+      "baseline_load_duration_ms": 135,
+      "write_duration_ms": 851,
+      "flush_count": 40,
+      "final_rows": 100000,
+      "data_objects": 81,
+      "delete_objects": 40,
+      "total_objects": 81,
+      "total_object_bytes": 2314828,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 8,
+          "p95_ms": 9
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 7,
+          "p95_ms": 7
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 7,
+          "p95_ms": 7
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 15,
+          "p95_ms": 17
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "update-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 10000,
+        "delete_rows": 0,
+        "flush_rows": 500
+      },
+      "baseline_load_duration_ms": 127,
+      "write_duration_ms": 800,
+      "flush_count": 40,
+      "final_rows": 100000,
+      "data_objects": 81,
+      "delete_objects": 40,
+      "total_objects": 81,
+      "total_object_bytes": 2313943,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 7,
+          "p95_ms": 7
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 5,
+          "p95_ms": 9
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 5,
+          "p95_ms": 7
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 11,
+          "p95_ms": 12
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "iceberg-cow",
+        "format": "iceberg",
+        "iceberg_mutation": "cow"
+      },
+      "scenario": {
+        "name": "delete-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 0,
+        "delete_rows": 10000,
+        "flush_rows": 500
+      },
+      "baseline_load_duration_ms": 150,
+      "write_duration_ms": 3214,
+      "flush_count": 20,
+      "final_rows": 90000,
+      "data_objects": 21,
+      "delete_objects": 86,
+      "total_objects": 86,
+      "total_object_bytes": 26826385,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 9,
+          "p95_ms": 10
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 6,
+          "p95_ms": 7
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 6,
+          "p95_ms": 7
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 9,
+          "p95_ms": 11
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "delete-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 0,
+        "delete_rows": 10000,
+        "flush_rows": 500
+      },
+      "baseline_load_duration_ms": 136,
+      "write_duration_ms": 362,
+      "flush_count": 20,
+      "final_rows": 90000,
+      "data_objects": 21,
+      "delete_objects": 21,
+      "total_objects": 21,
+      "total_object_bytes": 1715908,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 10,
+          "p95_ms": 11
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 9,
+          "p95_ms": 9
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 8,
+          "p95_ms": 9
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 14,
+          "p95_ms": 15
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "delete-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 0,
+        "delete_rows": 10000,
+        "flush_rows": 500
+      },
+      "baseline_load_duration_ms": 138,
+      "write_duration_ms": 376,
+      "flush_count": 20,
+      "final_rows": 90000,
+      "data_objects": 21,
+      "delete_objects": 21,
+      "total_objects": 21,
+      "total_object_bytes": 1714976,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 7,
+          "p95_ms": 9
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 6,
+          "p95_ms": 8
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 6,
+          "p95_ms": 6
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 10,
+          "p95_ms": 10
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "iceberg-cow",
+        "format": "iceberg",
+        "iceberg_mutation": "cow"
+      },
+      "scenario": {
+        "name": "mixed-append-update-delete",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 10000,
+        "delete_rows": 10000,
+        "flush_rows": 500
+      },
+      "baseline_load_duration_ms": 150,
+      "write_duration_ms": 10668,
+      "flush_count": 80,
+      "final_rows": 100000,
+      "data_objects": 81,
+      "delete_objects": 326,
+      "total_objects": 326,
+      "total_object_bytes": 83220894,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 13,
+          "p95_ms": 14
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 9,
+          "p95_ms": 11
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 10,
+          "p95_ms": 23
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 10,
+          "p95_ms": 10
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "mixed-append-update-delete",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 10000,
+        "delete_rows": 10000,
+        "flush_rows": 500
+      },
+      "baseline_load_duration_ms": 158,
+      "write_duration_ms": 1473,
+      "flush_count": 80,
+      "final_rows": 100000,
+      "data_objects": 121,
+      "delete_objects": 121,
+      "total_objects": 121,
+      "total_object_bytes": 3764807,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 9,
+          "p95_ms": 10
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 7,
+          "p95_ms": 8
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 8,
+          "p95_ms": 8
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 14,
+          "p95_ms": 21
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "mixed-append-update-delete",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 10000,
+        "delete_rows": 10000,
+        "flush_rows": 500
+      },
+      "baseline_load_duration_ms": 131,
+      "write_duration_ms": 1230,
+      "flush_count": 80,
+      "final_rows": 100000,
+      "data_objects": 121,
+      "delete_objects": 121,
+      "total_objects": 121,
+      "total_object_bytes": 3726491,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 8,
+          "p95_ms": 9
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 6,
+          "p95_ms": 7
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 6,
+          "p95_ms": 6
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 10,
+          "p95_ms": 12
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "iceberg-cow",
+        "format": "iceberg",
+        "iceberg_mutation": "cow"
+      },
+      "scenario": {
+        "name": "append",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 0,
+        "delete_rows": 0,
+        "flush_rows": 1000
+      },
+      "baseline_load_duration_ms": 152,
+      "write_duration_ms": 120,
+      "flush_count": 10,
+      "final_rows": 110000,
+      "data_objects": 11,
+      "delete_objects": 0,
+      "total_objects": 46,
+      "total_object_bytes": 1614623,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 11,
+          "p95_ms": 12
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 8,
+          "p95_ms": 9
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 8,
+          "p95_ms": 10
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 8,
+          "p95_ms": 16
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "append",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 0,
+        "delete_rows": 0,
+        "flush_rows": 1000
+      },
+      "baseline_load_duration_ms": 138,
+      "write_duration_ms": 120,
+      "flush_count": 10,
+      "final_rows": 110000,
+      "data_objects": 11,
+      "delete_objects": 0,
+      "total_objects": 11,
+      "total_object_bytes": 1399017,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 6,
+          "p95_ms": 7
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 3,
+          "p95_ms": 4
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 3,
+          "p95_ms": 3
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 6,
+          "p95_ms": 6
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "append",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 0,
+        "delete_rows": 0,
+        "flush_rows": 1000
+      },
+      "baseline_load_duration_ms": 142,
+      "write_duration_ms": 88,
+      "flush_count": 10,
+      "final_rows": 110000,
+      "data_objects": 11,
+      "delete_objects": 0,
+      "total_objects": 11,
+      "total_object_bytes": 1398810,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 4,
+          "p95_ms": 5
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 2,
+          "p95_ms": 3
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 2,
+          "p95_ms": 2
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 4,
+          "p95_ms": 4
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "iceberg-cow",
+        "format": "iceberg",
+        "iceberg_mutation": "cow"
+      },
+      "scenario": {
+        "name": "update-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 10000,
+        "delete_rows": 0,
+        "flush_rows": 1000
+      },
+      "baseline_load_duration_ms": 159,
+      "write_duration_ms": 3322,
+      "flush_count": 20,
+      "final_rows": 100000,
+      "data_objects": 21,
+      "delete_objects": 0,
+      "total_objects": 86,
+      "total_object_bytes": 28206701,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 9,
+          "p95_ms": 12
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 6,
+          "p95_ms": 7
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 7,
+          "p95_ms": 7
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 11,
+          "p95_ms": 12
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "update-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 10000,
+        "delete_rows": 0,
+        "flush_rows": 1000
+      },
+      "baseline_load_duration_ms": 132,
+      "write_duration_ms": 450,
+      "flush_count": 20,
+      "final_rows": 100000,
+      "data_objects": 41,
+      "delete_objects": 20,
+      "total_objects": 41,
+      "total_object_bytes": 1860731,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 10,
+          "p95_ms": 11
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 8,
+          "p95_ms": 9
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 9,
+          "p95_ms": 31
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 15,
+          "p95_ms": 17
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "update-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 10000,
+        "delete_rows": 0,
+        "flush_rows": 1000
+      },
+      "baseline_load_duration_ms": 141,
+      "write_duration_ms": 421,
+      "flush_count": 20,
+      "final_rows": 100000,
+      "data_objects": 41,
+      "delete_objects": 20,
+      "total_objects": 41,
+      "total_object_bytes": 1865054,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 8,
+          "p95_ms": 8
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 7,
+          "p95_ms": 7
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 6,
+          "p95_ms": 52
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 13,
+          "p95_ms": 15
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "iceberg-cow",
+        "format": "iceberg",
+        "iceberg_mutation": "cow"
+      },
+      "scenario": {
+        "name": "delete-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 0,
+        "delete_rows": 10000,
+        "flush_rows": 1000
+      },
+      "baseline_load_duration_ms": 153,
+      "write_duration_ms": 1582,
+      "flush_count": 10,
+      "final_rows": 90000,
+      "data_objects": 11,
+      "delete_objects": 46,
+      "total_objects": 46,
+      "total_object_bytes": 14008064,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 9,
+          "p95_ms": 10
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 6,
+          "p95_ms": 7
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 6,
+          "p95_ms": 6
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 10,
+          "p95_ms": 11
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "delete-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 0,
+        "delete_rows": 10000,
+        "flush_rows": 1000
+      },
+      "baseline_load_duration_ms": 133,
+      "write_duration_ms": 190,
+      "flush_count": 10,
+      "final_rows": 90000,
+      "data_objects": 11,
+      "delete_objects": 11,
+      "total_objects": 11,
+      "total_object_bytes": 1500044,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 10,
+          "p95_ms": 11
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 9,
+          "p95_ms": 11
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 8,
+          "p95_ms": 10
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 14,
+          "p95_ms": 15
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "delete-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 0,
+        "delete_rows": 10000,
+        "flush_rows": 1000
+      },
+      "baseline_load_duration_ms": 139,
+      "write_duration_ms": 131,
+      "flush_count": 10,
+      "final_rows": 90000,
+      "data_objects": 11,
+      "delete_objects": 11,
+      "total_objects": 11,
+      "total_object_bytes": 1497799,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 7,
+          "p95_ms": 7
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 7,
+          "p95_ms": 8
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 7,
+          "p95_ms": 7
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 13,
+          "p95_ms": 16
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "iceberg-cow",
+        "format": "iceberg",
+        "iceberg_mutation": "cow"
+      },
+      "scenario": {
+        "name": "mixed-append-update-delete",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 10000,
+        "delete_rows": 10000,
+        "flush_rows": 1000
+      },
+      "baseline_load_duration_ms": 168,
+      "write_duration_ms": 5118,
+      "flush_count": 40,
+      "final_rows": 100000,
+      "data_objects": 41,
+      "delete_objects": 166,
+      "total_objects": 166,
+      "total_object_bytes": 41602261,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 11,
+          "p95_ms": 11
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 7,
+          "p95_ms": 9
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 8,
+          "p95_ms": 10
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 8,
+          "p95_ms": 10
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "mixed-append-update-delete",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 10000,
+        "delete_rows": 10000,
+        "flush_rows": 1000
+      },
+      "baseline_load_duration_ms": 139,
+      "write_duration_ms": 735,
+      "flush_count": 40,
+      "final_rows": 100000,
+      "data_objects": 61,
+      "delete_objects": 61,
+      "total_objects": 61,
+      "total_object_bytes": 2640047,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 9,
+          "p95_ms": 11
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 9,
+          "p95_ms": 11
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 8,
+          "p95_ms": 10
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 14,
+          "p95_ms": 16
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "mixed-append-update-delete",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 10000,
+        "delete_rows": 10000,
+        "flush_rows": 1000
+      },
+      "baseline_load_duration_ms": 131,
+      "write_duration_ms": 607,
+      "flush_count": 40,
+      "final_rows": 100000,
+      "data_objects": 61,
+      "delete_objects": 61,
+      "total_objects": 61,
+      "total_object_bytes": 2647991,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 7,
+          "p95_ms": 9
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 6,
+          "p95_ms": 8
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 6,
+          "p95_ms": 7
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 12,
+          "p95_ms": 15
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "iceberg-cow",
+        "format": "iceberg",
+        "iceberg_mutation": "cow"
+      },
+      "scenario": {
+        "name": "append",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 0,
+        "delete_rows": 0,
+        "flush_rows": 10000
+      },
+      "baseline_load_duration_ms": 145,
+      "write_duration_ms": 26,
+      "flush_count": 1,
+      "final_rows": 110000,
+      "data_objects": 2,
+      "delete_objects": 0,
+      "total_objects": 10,
+      "total_object_bytes": 1484295,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 9,
+          "p95_ms": 10
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 6,
+          "p95_ms": 7
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 6,
+          "p95_ms": 7
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 7,
+          "p95_ms": 8
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "append",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 0,
+        "delete_rows": 0,
+        "flush_rows": 10000
+      },
+      "baseline_load_duration_ms": 145,
+      "write_duration_ms": 40,
+      "flush_count": 1,
+      "final_rows": 110000,
+      "data_objects": 2,
+      "delete_objects": 0,
+      "total_objects": 2,
+      "total_object_bytes": 1392911,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 5,
+          "p95_ms": 6
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 3,
+          "p95_ms": 4
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 3,
+          "p95_ms": 3
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 6,
+          "p95_ms": 7
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "append",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 0,
+        "delete_rows": 0,
+        "flush_rows": 10000
+      },
+      "baseline_load_duration_ms": 134,
+      "write_duration_ms": 35,
+      "flush_count": 1,
+      "final_rows": 110000,
+      "data_objects": 2,
+      "delete_objects": 0,
+      "total_objects": 2,
+      "total_object_bytes": 1392542,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 3,
+          "p95_ms": 4
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 2,
+          "p95_ms": 3
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 2,
+          "p95_ms": 2
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 4,
+          "p95_ms": 5
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "iceberg-cow",
+        "format": "iceberg",
+        "iceberg_mutation": "cow"
+      },
+      "scenario": {
+        "name": "update-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 10000,
+        "delete_rows": 0,
+        "flush_rows": 10000
+      },
+      "baseline_load_duration_ms": 148,
+      "write_duration_ms": 346,
+      "flush_count": 2,
+      "final_rows": 100000,
+      "data_objects": 3,
+      "delete_objects": 0,
+      "total_objects": 14,
+      "total_object_bytes": 4013724,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 9,
+          "p95_ms": 10
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 6,
+          "p95_ms": 7
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 6,
+          "p95_ms": 8
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 11,
+          "p95_ms": 11
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "update-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 10000,
+        "delete_rows": 0,
+        "flush_rows": 10000
+      },
+      "baseline_load_duration_ms": 136,
+      "write_duration_ms": 82,
+      "flush_count": 2,
+      "final_rows": 100000,
+      "data_objects": 5,
+      "delete_objects": 2,
+      "total_objects": 5,
+      "total_object_bytes": 1459879,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 9,
+          "p95_ms": 11
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 7,
+          "p95_ms": 9
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 7,
+          "p95_ms": 9
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 14,
+          "p95_ms": 16
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "update-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 10000,
+        "delete_rows": 0,
+        "flush_rows": 10000
+      },
+      "baseline_load_duration_ms": 130,
+      "write_duration_ms": 73,
+      "flush_count": 2,
+      "final_rows": 100000,
+      "data_objects": 5,
+      "delete_objects": 2,
+      "total_objects": 5,
+      "total_object_bytes": 1459189,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 8,
+          "p95_ms": 9
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 6,
+          "p95_ms": 8
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 5,
+          "p95_ms": 6
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 13,
+          "p95_ms": 14
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "iceberg-cow",
+        "format": "iceberg",
+        "iceberg_mutation": "cow"
+      },
+      "scenario": {
+        "name": "delete-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 0,
+        "delete_rows": 10000,
+        "flush_rows": 10000
+      },
+      "baseline_load_duration_ms": 148,
+      "write_duration_ms": 163,
+      "flush_count": 1,
+      "final_rows": 90000,
+      "data_objects": 2,
+      "delete_objects": 10,
+      "total_objects": 10,
+      "total_object_bytes": 2548324,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 9,
+          "p95_ms": 10
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 6,
+          "p95_ms": 7
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 6,
+          "p95_ms": 6
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 10,
+          "p95_ms": 12
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "delete-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 0,
+        "delete_rows": 10000,
+        "flush_rows": 10000
+      },
+      "baseline_load_duration_ms": 134,
+      "write_duration_ms": 44,
+      "flush_count": 1,
+      "final_rows": 90000,
+      "data_objects": 2,
+      "delete_objects": 2,
+      "total_objects": 2,
+      "total_object_bytes": 1303956,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 8,
+          "p95_ms": 9
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 8,
+          "p95_ms": 10
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 7,
+          "p95_ms": 8
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 14,
+          "p95_ms": 17
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "delete-10pct",
+        "baseline_rows": 100000,
+        "insert_rows": 0,
+        "update_rows": 0,
+        "delete_rows": 10000,
+        "flush_rows": 10000
+      },
+      "baseline_load_duration_ms": 137,
+      "write_duration_ms": 38,
+      "flush_count": 1,
+      "final_rows": 90000,
+      "data_objects": 2,
+      "delete_objects": 2,
+      "total_objects": 2,
+      "total_object_bytes": 1304729,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 7,
+          "p95_ms": 9
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 6,
+          "p95_ms": 7
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 5,
+          "p95_ms": 5
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 11,
+          "p95_ms": 11
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "iceberg-cow",
+        "format": "iceberg",
+        "iceberg_mutation": "cow"
+      },
+      "scenario": {
+        "name": "mixed-append-update-delete",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 10000,
+        "delete_rows": 10000,
+        "flush_rows": 10000
+      },
+      "baseline_load_duration_ms": 161,
+      "write_duration_ms": 527,
+      "flush_count": 4,
+      "final_rows": 100000,
+      "data_objects": 5,
+      "delete_objects": 22,
+      "total_objects": 22,
+      "total_object_bytes": 5370030,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 8,
+          "p95_ms": 9
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 6,
+          "p95_ms": 8
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 6,
+          "p95_ms": 7
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 7,
+          "p95_ms": 13
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-sqlite",
+        "format": "ducklake",
+        "ducklake_catalog": "sqlite"
+      },
+      "scenario": {
+        "name": "mixed-append-update-delete",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 10000,
+        "delete_rows": 10000,
+        "flush_rows": 10000
+      },
+      "baseline_load_duration_ms": 136,
+      "write_duration_ms": 122,
+      "flush_count": 4,
+      "final_rows": 100000,
+      "data_objects": 7,
+      "delete_objects": 7,
+      "total_objects": 7,
+      "total_object_bytes": 1673733,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 10,
+          "p95_ms": 10
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 9,
+          "p95_ms": 10
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 8,
+          "p95_ms": 9
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 13,
+          "p95_ms": 14
+        }
+      ]
+    },
+    {
+      "target": {
+        "name": "ducklake-duckdb",
+        "format": "ducklake",
+        "ducklake_catalog": "duckdb"
+      },
+      "scenario": {
+        "name": "mixed-append-update-delete",
+        "baseline_rows": 100000,
+        "insert_rows": 10000,
+        "update_rows": 10000,
+        "delete_rows": 10000,
+        "flush_rows": 10000
+      },
+      "baseline_load_duration_ms": 127,
+      "write_duration_ms": 123,
+      "flush_count": 4,
+      "final_rows": 100000,
+      "data_objects": 7,
+      "delete_objects": 7,
+      "total_objects": 7,
+      "total_object_bytes": 1673046,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 10,
+          "p95_ms": 45
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 7,
+          "p95_ms": 10
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 6,
+          "p95_ms": 8
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 14,
+          "p95_ms": 16
+        }
+      ]
+    }
+  ],
+  "caveats": [
+    "This benchmark bypasses Postgres logical replication and exercises writer + catalog commit + DuckDB reads only.",
+    "Baseline load is performed as one bulk flush and reported separately; write_duration_ms measures only the scenario workload at the configured flush_rows.",
+    "Iceberg and DuckLake write data to local MinIO; DuckLake catalog is local SQLite or DuckDB as configured.",
+    "Read timings include DuckDB query execution over the produced lake but do not include psql-wire server overhead."
+  ]
+}
