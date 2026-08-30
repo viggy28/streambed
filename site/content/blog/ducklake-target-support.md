@@ -1,4 +1,9 @@
-# The small-file problem gets worse with CDC
+---
+title: "The small-file problem gets worse with CDC"
+date: 2026-08-30
+authors:
+  - name: Vignesh (Viggy) Ravichandran
+---
 
 _Why Streambed is adopting DuckLake for Postgres-to-DuckDB analytics._
 
@@ -20,7 +25,9 @@ So the question became simpler:
 
 We started testing DuckLake to answer that.
 
-![What one CDC flush costs](./images/streamed-ducklake-iceberg.png)
+<!--more-->
+
+![What one CDC flush costs](/images/streamed-ducklake-iceberg.png)
 
 ## Why CDC makes this painful
 
@@ -91,7 +98,7 @@ The benchmark bypasses PostgreSQL logical replication and psql-wire overhead. It
 
 Full benchmark notes and raw results are here:
 
-[DuckLake vs Iceberg benchmark](./benchmarks/ducklake-vs-iceberg.md)
+[DuckLake vs Iceberg benchmark](https://github.com/viggy28/streambed/blob/main/docs/benchmarks/ducklake-vs-iceberg.md)
 
 ## What this means for Streambed
 
