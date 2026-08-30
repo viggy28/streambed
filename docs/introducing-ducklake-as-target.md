@@ -20,7 +20,7 @@ So the question became simpler:
 
 We started testing DuckLake to answer that.
 
-![What one CDC flush costs](./images/streamed-ducklake-iceberg.png)
+![What one CDC flush costs](./images/streambed-ducklake.png)
 
 ## Why CDC makes this painful
 

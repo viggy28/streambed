@@ -27,7 +27,7 @@ We started testing DuckLake to answer that.
 
 <!--more-->
 
-![What one CDC flush costs](/images/streamed-ducklake-iceberg.png)
+![What one CDC flush costs](/images/streambed-ducklake.png)
 
 ## Why CDC makes this painful
 
