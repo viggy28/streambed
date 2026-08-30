@@ -14,16 +14,56 @@ import (
 
 func newTestWriter(t *testing.T) *Writer {
 	t.Helper()
+	return newTestWriterWithCatalogStore(t, "sqlite")
+}
+
+func newTestWriterWithCatalogStore(t *testing.T, catalogStore string) *Writer {
+	t.Helper()
 	dir := t.TempDir()
+	catalogPath := filepath.Join(dir, "catalog.sqlite")
+	if catalogStore == "duckdb" {
+		catalogPath = filepath.Join(dir, "catalog.ducklake")
+	}
 	w, err := NewWriter(context.Background(), Config{
-		CatalogPath: filepath.Join(dir, "catalog.sqlite"),
-		DataPath:    filepath.Join(dir, "data") + "/",
+		CatalogPath:  catalogPath,
+		CatalogStore: catalogStore,
+		DataPath:     filepath.Join(dir, "data") + "/",
 	}, nil, 100, time.Second, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
 	if err != nil {
 		t.Fatalf("NewWriter: %v", err)
 	}
 	t.Cleanup(func() { w.Close() })
 	return w
+}
+
+func TestWriterDuckDBCatalog(t *testing.T) {
+	ctx := context.Background()
+	w := newTestWriterWithCatalogStore(t, "duckdb")
+	cols := []wal.Column{{Name: "id", OID: 23, IsKey: true}, {Name: "name", OID: 25}}
+	if _, err := w.HandleEvent(ctx, wal.RowEvent{
+		Schema:     "public",
+		Table:      "duckdb_catalog_orders",
+		Columns:    cols,
+		KeyColumns: []int{0},
+		Op:         wal.OpInsert,
+		Values: []wal.ColumnValue{
+			{Name: "id", OID: 23, Value: []byte("1")},
+			{Name: "name", OID: 25, Value: []byte("alice")},
+		},
+		WALStartLSN: mustLSN(t, "0/10"),
+	}); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	if err := w.FlushAll(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	var got string
+	if err := w.db.QueryRowContext(ctx, `SELECT name FROM "streambed"."public"."duckdb_catalog_orders" WHERE id = 1`).Scan(&got); err != nil {
+		t.Fatalf("query duckdb-catalog ducklake table: %v", err)
+	}
+	if got != "alice" {
+		t.Fatalf("got %q, want alice", got)
+	}
 }
 
 func TestWriterInsertUpdateDeleteAndLSN(t *testing.T) {

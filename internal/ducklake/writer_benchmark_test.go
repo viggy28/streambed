@@ -32,23 +32,59 @@ func BenchmarkWriterOperationMatrix(b *testing.B) {
 		{"delete", 5000, 1},
 		{"delete", 1000, 4},
 	}
+	for _, store := range []string{"sqlite", "duckdb"} {
+		for _, tc := range cases {
+			name := fmt.Sprintf("catalog=%s/%s/rows=%d/tables=%d", store, tc.op, tc.rows, tc.tables)
+			b.Run(name, func(b *testing.B) {
+				for i := 0; i < b.N; i++ {
+					benchDuckLakeOperation(b, store, tc.op, tc.rows, tc.tables)
+				}
+			})
+		}
+	}
+}
+
+func BenchmarkWriterDuckDBCatalogOperationMatrix(b *testing.B) {
+	cases := []struct {
+		op     string
+		rows   int
+		tables int
+	}{
+		{"insert", 100, 1},
+		{"insert", 1000, 1},
+		{"insert", 5000, 1},
+		{"insert", 1000, 4},
+		{"update", 100, 1},
+		{"update", 1000, 1},
+		{"update", 5000, 1},
+		{"update", 1000, 4},
+		{"delete", 100, 1},
+		{"delete", 1000, 1},
+		{"delete", 5000, 1},
+		{"delete", 1000, 4},
+	}
 	for _, tc := range cases {
 		name := fmt.Sprintf("%s/rows=%d/tables=%d", tc.op, tc.rows, tc.tables)
 		b.Run(name, func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				benchDuckLakeOperation(b, tc.op, tc.rows, tc.tables)
+				benchDuckLakeOperation(b, "duckdb", tc.op, tc.rows, tc.tables)
 			}
 		})
 	}
 }
 
-func benchDuckLakeOperation(b *testing.B, op string, rows, tables int) {
+func benchDuckLakeOperation(b *testing.B, catalogStore, op string, rows, tables int) {
 	b.Helper()
 	ctx := context.Background()
 	dir := b.TempDir()
+	catalogPath := filepath.Join(dir, "catalog.sqlite")
+	if catalogStore == "duckdb" {
+		catalogPath = filepath.Join(dir, "catalog.ducklake")
+	}
 	w, err := NewWriter(ctx, Config{
-		CatalogPath: filepath.Join(dir, "catalog.sqlite"),
-		DataPath:    filepath.Join(dir, "data") + "/",
+		CatalogPath:  catalogPath,
+		CatalogStore: catalogStore,
+		DataPath:     filepath.Join(dir, "data") + "/",
 	}, nil, rows*tables+1, time.Second, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
 	if err != nil {
 		b.Fatalf("NewWriter: %v", err)

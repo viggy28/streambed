@@ -9,39 +9,41 @@ import (
 )
 
 type Config struct {
-	SourceURL        string
-	S3Bucket         string
-	S3Prefix         string
-	S3Endpoint       string
-	S3Region         string
-	StatePath        string
-	TargetFormat     string // lakehouse target: "iceberg" or "ducklake"
-	DuckLakeCatalog  string // SQLite catalog DB path for DuckLake metadata
-	DuckLakeDataPath string // DuckLake data path (defaults to s3://bucket/prefix/ducklake/)
-	SlotName         string
-	FlushRows        int
-	FlushInterval    time.Duration
-	TargetFileSizeMB int
-	IncludeTables    []string
-	ExcludeTables    []string
-	LogLevel         string
-	MutationMode     string // Iceberg row mutation strategy: "cow" or "mor"
-	QueryAddr        string // listen address for query server (e.g., ":5433")
+	SourceURL            string
+	S3Bucket             string
+	S3Prefix             string
+	S3Endpoint           string
+	S3Region             string
+	StatePath            string
+	TargetFormat         string // lakehouse target: "iceberg" or "ducklake"
+	DuckLakeCatalog      string // catalog DB path for DuckLake metadata
+	DuckLakeCatalogStore string // DuckLake catalog store: "sqlite" (default) or "duckdb"
+	DuckLakeDataPath     string // DuckLake data path (defaults to s3://bucket/prefix/ducklake/)
+	SlotName             string
+	FlushRows            int
+	FlushInterval        time.Duration
+	TargetFileSizeMB     int
+	IncludeTables        []string
+	ExcludeTables        []string
+	LogLevel             string
+	MutationMode         string // Iceberg row mutation strategy: "cow" or "mor"
+	QueryAddr            string // listen address for query server (e.g., ":5433")
 }
 
 func Default() *Config {
 	return &Config{
-		S3Prefix:         "streambed/",
-		S3Region:         "us-east-1",
-		StatePath:        defaultStatePath(),
-		TargetFormat:     "iceberg",
-		DuckLakeCatalog:  defaultDuckLakeCatalogPath(),
-		SlotName:         "streambed",
-		FlushRows:        10000,
-		FlushInterval:    2 * time.Second,
-		TargetFileSizeMB: 128,
-		LogLevel:         "INFO",
-		MutationMode:     "cow",
+		S3Prefix:             "streambed/",
+		S3Region:             "us-east-1",
+		StatePath:            defaultStatePath(),
+		TargetFormat:         "iceberg",
+		DuckLakeCatalog:      defaultDuckLakeCatalogPath(),
+		DuckLakeCatalogStore: "sqlite",
+		SlotName:             "streambed",
+		FlushRows:            10000,
+		FlushInterval:        2 * time.Second,
+		TargetFileSizeMB:     128,
+		LogLevel:             "INFO",
+		MutationMode:         "cow",
 	}
 }
 
@@ -89,6 +91,9 @@ func Load() *Config {
 	}
 	if v := os.Getenv("STREAMBED_DUCKLAKE_CATALOG"); v != "" {
 		cfg.DuckLakeCatalog = v
+	}
+	if v := os.Getenv("STREAMBED_DUCKLAKE_CATALOG_STORE"); v != "" {
+		cfg.DuckLakeCatalogStore = strings.ToLower(v)
 	}
 	if v := os.Getenv("STREAMBED_DUCKLAKE_DATA_PATH"); v != "" {
 		cfg.DuckLakeDataPath = v
@@ -158,6 +163,9 @@ func (c *Config) Validate() error {
 	if c.TargetFormat == "ducklake" && c.DuckLakeCatalog == "" {
 		return fmt.Errorf("ducklake-catalog is required when target-format=ducklake")
 	}
+	if c.DuckLakeCatalogStore != "sqlite" && c.DuckLakeCatalogStore != "duckdb" {
+		return fmt.Errorf("ducklake-catalog-store must be one of: sqlite, duckdb")
+	}
 	if c.FlushRows <= 0 {
 		return fmt.Errorf("flush-rows must be positive")
 	}
@@ -184,6 +192,9 @@ func (c *Config) ValidateQuery() error {
 	}
 	if c.TargetFormat == "ducklake" && c.DuckLakeCatalog == "" {
 		return fmt.Errorf("ducklake-catalog is required when target-format=ducklake")
+	}
+	if c.DuckLakeCatalogStore != "sqlite" && c.DuckLakeCatalogStore != "duckdb" {
+		return fmt.Errorf("ducklake-catalog-store must be one of: sqlite, duckdb")
 	}
 	if c.QueryAddr == "" {
 		return fmt.Errorf("listen-addr is required")

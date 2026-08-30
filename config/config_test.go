@@ -38,6 +38,9 @@ func TestDefaults(t *testing.T) {
 	if cfg.DuckLakeCatalog == "" {
 		t.Error("expected DuckLakeCatalog default")
 	}
+	if cfg.DuckLakeCatalogStore != "sqlite" {
+		t.Errorf("expected DuckLakeCatalogStore 'sqlite', got %q", cfg.DuckLakeCatalogStore)
+	}
 }
 
 func TestLoadFromEnv(t *testing.T) {
@@ -51,7 +54,8 @@ func TestLoadFromEnv(t *testing.T) {
 	os.Setenv("STREAMBED_LOG_LEVEL", "debug")
 	os.Setenv("STREAMBED_MUTATION_MODE", "mor")
 	os.Setenv("STREAMBED_TARGET_FORMAT", "ducklake")
-	os.Setenv("STREAMBED_DUCKLAKE_CATALOG", "/tmp/streambed-ducklake.sqlite")
+	os.Setenv("STREAMBED_DUCKLAKE_CATALOG", "/tmp/streambed-ducklake.ducklake")
+	os.Setenv("STREAMBED_DUCKLAKE_CATALOG_STORE", "duckdb")
 	os.Setenv("STREAMBED_DUCKLAKE_DATA_PATH", "s3://my-bucket/data/ducklake")
 	defer func() {
 		os.Unsetenv("STREAMBED_SOURCE_URL")
@@ -65,6 +69,7 @@ func TestLoadFromEnv(t *testing.T) {
 		os.Unsetenv("STREAMBED_MUTATION_MODE")
 		os.Unsetenv("STREAMBED_TARGET_FORMAT")
 		os.Unsetenv("STREAMBED_DUCKLAKE_CATALOG")
+		os.Unsetenv("STREAMBED_DUCKLAKE_CATALOG_STORE")
 		os.Unsetenv("STREAMBED_DUCKLAKE_DATA_PATH")
 	}()
 
@@ -99,8 +104,11 @@ func TestLoadFromEnv(t *testing.T) {
 	if cfg.TargetFormat != "ducklake" {
 		t.Errorf("expected TargetFormat 'ducklake', got %q", cfg.TargetFormat)
 	}
-	if cfg.DuckLakeCatalog != "/tmp/streambed-ducklake.sqlite" {
+	if cfg.DuckLakeCatalog != "/tmp/streambed-ducklake.ducklake" {
 		t.Errorf("expected DuckLakeCatalog from env, got %q", cfg.DuckLakeCatalog)
+	}
+	if cfg.DuckLakeCatalogStore != "duckdb" {
+		t.Errorf("expected DuckLakeCatalogStore from env, got %q", cfg.DuckLakeCatalogStore)
 	}
 	if got := cfg.EffectiveDuckLakeDataPath(); got != "s3://my-bucket/data/ducklake/" {
 		t.Errorf("expected normalized DuckLake data path, got %q", got)
@@ -126,20 +134,23 @@ func TestValidate(t *testing.T) {
 			c.TargetFormat = "ducklake"
 			c.DuckLakeCatalog = ""
 		}, "ducklake-catalog is required"},
+		{"invalid ducklake catalog store", func(c *Config) { c.DuckLakeCatalogStore = "mysql" }, "ducklake-catalog-store must be one of"},
+		{"valid duckdb catalog store", func(c *Config) { c.DuckLakeCatalogStore = "duckdb" }, ""},
 		{"valid config", func(c *Config) {}, ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &Config{
-				SourceURL:        "postgres://localhost/test",
-				S3Bucket:         "bucket",
-				FlushRows:        10000,
-				FlushInterval:    30 * time.Second,
-				TargetFileSizeMB: 128,
-				TargetFormat:     "iceberg",
-				DuckLakeCatalog:  "/tmp/ducklake.sqlite",
-				MutationMode:     "cow",
+				SourceURL:            "postgres://localhost/test",
+				S3Bucket:             "bucket",
+				FlushRows:            10000,
+				FlushInterval:        30 * time.Second,
+				TargetFileSizeMB:     128,
+				TargetFormat:         "iceberg",
+				DuckLakeCatalog:      "/tmp/ducklake.sqlite",
+				DuckLakeCatalogStore: "sqlite",
+				MutationMode:         "cow",
 			}
 			tt.modify(cfg)
 			err := cfg.Validate()

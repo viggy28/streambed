@@ -18,14 +18,15 @@ import (
 
 // ServerConfig holds configuration for the query server.
 type ServerConfig struct {
-	ListenAddr       string
-	S3Bucket         string
-	S3Prefix         string
-	S3Endpoint       string
-	S3Region         string
-	TargetFormat     string
-	DuckLakeCatalog  string
-	DuckLakeDataPath string
+	ListenAddr           string
+	S3Bucket             string
+	S3Prefix             string
+	S3Endpoint           string
+	S3Region             string
+	TargetFormat         string
+	DuckLakeCatalog      string
+	DuckLakeCatalogStore string
+	DuckLakeDataPath     string
 }
 
 // Server implements a Postgres-wire-compatible query interface backed by DuckDB.
@@ -50,10 +51,11 @@ func NewServer(cfg ServerConfig, s3Client storage.ObjectStorage, logger *slog.Lo
 	var catalog *TableCatalog
 	if cfg.TargetFormat == "ducklake" {
 		if err := ducklake.Configure(context.Background(), db, ducklake.Config{
-			CatalogPath: cfg.DuckLakeCatalog,
-			DataPath:    cfg.DuckLakeDataPath,
-			S3Endpoint:  cfg.S3Endpoint,
-			S3Region:    cfg.S3Region,
+			CatalogPath:  cfg.DuckLakeCatalog,
+			CatalogStore: cfg.DuckLakeCatalogStore,
+			DataPath:     cfg.DuckLakeDataPath,
+			S3Endpoint:   cfg.S3Endpoint,
+			S3Region:     cfg.S3Region,
 		}); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("configure ducklake: %w", err)

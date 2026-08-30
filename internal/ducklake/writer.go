@@ -21,11 +21,12 @@ import (
 const defaultCatalogName = "streambed"
 
 type Config struct {
-	CatalogPath string
-	DataPath    string
-	S3Endpoint  string
-	S3Region    string
-	CatalogName string
+	CatalogPath  string
+	CatalogStore string // DuckLake catalog store: "sqlite" (default) or "duckdb"
+	DataPath     string
+	S3Endpoint   string
+	S3Region     string
+	CatalogName  string
 }
 
 type Writer struct {
@@ -95,16 +96,23 @@ func Open(ctx context.Context, cfg Config) (*sql.DB, error) {
 }
 
 func Configure(ctx context.Context, db *sql.DB, cfg Config) error {
+	catalogStore := normalizedCatalogStore(cfg.CatalogStore)
 	stmts := []string{
 		"INSTALL ducklake",
 		"LOAD ducklake",
-		"INSTALL sqlite",
-		"LOAD sqlite",
+	}
+	if catalogStore == "sqlite" {
+		stmts = append(stmts,
+			"INSTALL sqlite",
+			"LOAD sqlite",
+		)
+	}
+	stmts = append(stmts,
 		"INSTALL httpfs",
 		"LOAD httpfs",
 		"INSTALL icu",
 		"LOAD icu",
-	}
+	)
 	if cfg.S3Region != "" {
 		stmts = append(stmts, fmt.Sprintf("SET GLOBAL s3_region = '%s'", strings.ReplaceAll(cfg.S3Region, "'", "''")))
 	}
@@ -135,8 +143,8 @@ func Configure(ctx context.Context, db *sql.DB, cfg Config) error {
 			return fmt.Errorf("exec %q: %w", stmt, err)
 		}
 	}
-	attach := fmt.Sprintf("ATTACH 'ducklake:sqlite:%s' AS %s (DATA_PATH '%s')",
-		strings.ReplaceAll(cfg.CatalogPath, "'", "''"),
+	attach := fmt.Sprintf("ATTACH '%s' AS %s (DATA_PATH '%s')",
+		duckLakeAttachPath(cfg.CatalogPath, catalogStore),
 		quoteIdent(catalogName(cfg)),
 		strings.ReplaceAll(cfg.DataPath, "'", "''"),
 	)
@@ -144,6 +152,21 @@ func Configure(ctx context.Context, db *sql.DB, cfg Config) error {
 		return fmt.Errorf("attach ducklake catalog: %w", err)
 	}
 	return nil
+}
+
+func normalizedCatalogStore(store string) string {
+	if strings.EqualFold(store, "duckdb") {
+		return "duckdb"
+	}
+	return "sqlite"
+}
+
+func duckLakeAttachPath(catalogPath, catalogStore string) string {
+	escapedPath := strings.ReplaceAll(catalogPath, "'", "''")
+	if catalogStore == "duckdb" {
+		return "ducklake:" + escapedPath
+	}
+	return "ducklake:sqlite:" + escapedPath
 }
 
 func catalogName(cfg Config) string {
