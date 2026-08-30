@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/viggy28/streambed/internal/failpoint"
-	"github.com/viggy28/streambed/internal/iceberg"
 	"github.com/viggy28/streambed/internal/state"
 	"github.com/viggy28/streambed/internal/wal"
 )
@@ -20,8 +19,17 @@ const (
 	standbyTimeout = 10 * time.Second
 )
 
+// Writer is the durable sink used by the WAL pipeline. Iceberg and DuckLake
+// implementations both satisfy this small contract.
+type Writer interface {
+	HandleEvent(context.Context, wal.RowEvent) (bool, error)
+	HandleSchemaChange(context.Context, *wal.RelationMessage, map[string]string) error
+	FlushAll(context.Context) error
+	ComputePendingMinLSN() pglogrepl.LSN
+}
+
 // Pipeline is a single-goroutine sync engine that reads WAL events from
-// Postgres and writes them to S3/Iceberg. It replaces the previous
+// Postgres and writes them to a lakehouse sink. It replaces the previous
 // two-goroutine Consumer+Writer architecture, eliminating the channels
 // between them and simplifying ack bookkeeping.
 type Pipeline struct {
@@ -34,7 +42,7 @@ type Pipeline struct {
 	state         *state.Store
 	tableFlushLSN map[string]pglogrepl.LSN
 
-	writer        *iceberg.Writer
+	writer        Writer
 	metaQuerier   *wal.MetadataQuerier // for column default lookups on schema change
 	flushInterval time.Duration
 	logger        *slog.Logger
@@ -42,7 +50,7 @@ type Pipeline struct {
 
 // New creates a Pipeline that reads WAL from conn and flushes to the
 // provided Writer. tableFlushLSN is the per-table last flushed LSN read
-// from Iceberg at startup, keyed by "schema.table".
+// from the target lakehouse at startup, keyed by "schema.table".
 func New(
 	conn *pgconn.PgConn,
 	slotName, publication string,
@@ -51,7 +59,7 @@ func New(
 	logger *slog.Logger,
 	stateStore *state.Store,
 	tableFlushLSN map[string]pglogrepl.LSN,
-	writer *iceberg.Writer,
+	writer Writer,
 	flushInterval time.Duration,
 	metaQuerier *wal.MetadataQuerier,
 ) *Pipeline {
