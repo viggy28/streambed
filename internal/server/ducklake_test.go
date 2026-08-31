@@ -41,7 +41,6 @@ func TestDuckLakeServerUsesAttachedCatalogDirectly(t *testing.T) {
 		DuckLakeCatalog:      catalogPath,
 		DuckLakeCatalogStore: "duckdb",
 		DuckLakeDataPath:     dataPath,
-		DuckLakeDB:           writer.DB(),
 	}, nil, logger)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -51,6 +50,15 @@ func TestDuckLakeServerUsesAttachedCatalogDirectly(t *testing.T) {
 	assertDuckLakeCount(t, srv, `streambed.public.orders`, 1) // fully qualified
 	assertDuckLakeCount(t, srv, `public.orders`, 1)           // current catalog
 	assertDuckLakeCount(t, srv, `orders`, 1)                  // current catalog and schema
+
+	if _, err := srv.duckDB.Exec(`INSERT INTO streambed.public.orders VALUES (99, 'mallory')`); err == nil {
+		t.Fatal("query-side DuckLake attachment accepted a write")
+	}
+	// Mutating the query session must not disturb the writer's attachment. The
+	// next query also gets a fresh session, so this DETACH is self-contained.
+	if _, err := srv.duckDB.Exec(`USE memory; DETACH streambed`); err != nil {
+		t.Fatalf("detach query-side catalog: %v", err)
+	}
 
 	// Existing tables expose newly committed rows without recreating a view.
 	writeDuckLakeRow(t, writer, "orders", 2, "bob")
@@ -139,6 +147,11 @@ func writeDuckLakeRow(t *testing.T, writer *ducklake.Writer, table string, id in
 
 func assertDuckLakeCount(t *testing.T, srv *Server, table string, want int) {
 	t.Helper()
+	srv.duckDBMu.Lock()
+	defer srv.duckDBMu.Unlock()
+	if err := srv.resetDuckLakeQueryDB(context.Background()); err != nil {
+		t.Fatalf("reset DuckLake query DB: %v", err)
+	}
 	var got int
 	if err := srv.duckDB.QueryRow(`SELECT count(*) FROM ` + table).Scan(&got); err != nil {
 		t.Fatalf("query %s: %v", table, err)

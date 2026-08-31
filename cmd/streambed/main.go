@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"database/sql"
 	"fmt"
 	"log/slog"
 	"os"
@@ -327,13 +326,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 	}
 
 	// Start query server if --query-addr is set
-	var querySrv *server.Server
 	if cfg.QueryAddr != "" {
-		var duckLakeDB *sql.DB
-		if duckWriter != nil {
-			duckLakeDB = duckWriter.DB()
-		}
-		querySrv, err = server.NewServer(server.ServerConfig{
+		querySrv, err := server.NewServer(server.ServerConfig{
 			ListenAddr:           cfg.QueryAddr,
 			S3Bucket:             cfg.S3Bucket,
 			S3Prefix:             cfg.S3Prefix,
@@ -343,7 +337,6 @@ func runSync(cmd *cobra.Command, args []string) error {
 			DuckLakeCatalog:      cfg.DuckLakeCatalog,
 			DuckLakeCatalogStore: cfg.DuckLakeCatalogStore,
 			DuckLakeDataPath:     cfg.EffectiveDuckLakeDataPath(),
-			DuckLakeDB:           duckLakeDB,
 		}, s3Client, logger)
 		if err != nil {
 			return fmt.Errorf("create query server: %w", err)
@@ -532,12 +525,6 @@ func runSync(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			logger.Error("reconnect: writer setup failed", "error", err)
 			continue
-		}
-		if querySrv != nil && duckWriter != nil {
-			if err := querySrv.SetDuckLakeDB(duckWriter.DB()); err != nil {
-				logger.Error("reconnect: query server setup failed", "error", err)
-				continue
-			}
 		}
 		p = pipeline.New(pgConn, cfg.SlotName, pubName, startLSN, cfg.ExcludeTables,
 			logger, stateStore, tableFlushLSN, writer, cfg.FlushInterval, metaQuerier)
