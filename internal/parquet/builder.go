@@ -112,8 +112,10 @@ func oidToParquetNode(oid uint32) parquet.Node {
 		return parquet.Leaf(parquet.DoubleType)
 	case 1082: // date
 		return parquet.Date()
-	case 1114, 1184: // timestamp, timestamptz
-		return parquet.Timestamp(parquet.Microsecond)
+	case 1114: // timestamp without time zone
+		return parquet.TimestampAdjusted(parquet.Microsecond, false)
+	case 1184: // timestamptz
+		return parquet.TimestampAdjusted(parquet.Microsecond, true)
 	case 2950: // uuid
 		return parquet.UUID()
 	case 17: // bytea
