@@ -176,6 +176,12 @@ func catalogName(cfg Config) string {
 	return cfg.CatalogName
 }
 
+// DB returns the configured DuckDB handle so the in-process query server can
+// share the same DuckLake attachment and observe writer commits immediately.
+func (w *Writer) DB() *sql.DB {
+	return w.db
+}
+
 func (w *Writer) Close() error {
 	return w.db.Close()
 }

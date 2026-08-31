@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	duckdb "github.com/duckdb/duckdb-go/v2"
@@ -27,56 +28,114 @@ type ServerConfig struct {
 	DuckLakeCatalog      string
 	DuckLakeCatalogStore string
 	DuckLakeDataPath     string
+	DuckLakeDB           *sql.DB // optional shared writer connection for in-process sync + query
 }
 
 // Server implements a Postgres-wire-compatible query interface backed by DuckDB.
-// It reads Iceberg tables from S3 and serves them to any Postgres client.
+// It serves Iceberg views or tables from an attached DuckLake catalog.
 type Server struct {
-	cfg     ServerConfig
-	catalog *TableCatalog
-	duckDB  *sql.DB
-	logger  *slog.Logger
+	cfg        ServerConfig
+	catalog    *TableCatalog
+	duckDB     *sql.DB
+	duckDBMu   sync.RWMutex
+	ownsDuckDB bool
+	logger     *slog.Logger
 }
 
-// NewServer creates a query server. Initializes an embedded DuckDB instance
-// configured with S3 credentials and loads the Iceberg + httpfs extensions.
+// NewServer creates a query server and initializes DuckDB for the selected
+// lakehouse target.
 func NewServer(cfg ServerConfig, s3Client storage.ObjectStorage, logger *slog.Logger) (*Server, error) {
 	if cfg.TargetFormat == "" {
 		cfg.TargetFormat = "iceberg"
 	}
-	db, err := sql.Open("duckdb", "")
-	if err != nil {
-		return nil, fmt.Errorf("open duckdb: %w", err)
+	if cfg.DuckLakeDB != nil && cfg.TargetFormat != "ducklake" {
+		return nil, fmt.Errorf("shared DuckLake DB requires ducklake target")
+	}
+	db := cfg.DuckLakeDB
+	ownsDuckDB := db == nil
+	if db == nil {
+		var err error
+		db, err = sql.Open("duckdb", "")
+		if err != nil {
+			return nil, fmt.Errorf("open duckdb: %w", err)
+		}
+	}
+	closeOnError := func() {
+		if ownsDuckDB {
+			db.Close()
+		}
 	}
 	var catalog *TableCatalog
 	if cfg.TargetFormat == "ducklake" {
-		if err := ducklake.Configure(context.Background(), db, ducklake.Config{
-			CatalogPath:  cfg.DuckLakeCatalog,
-			CatalogStore: cfg.DuckLakeCatalogStore,
-			DataPath:     cfg.DuckLakeDataPath,
-			S3Endpoint:   cfg.S3Endpoint,
-			S3Region:     cfg.S3Region,
-		}); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("configure ducklake: %w", err)
+		// DuckLake attachments and USE are session-local. Keep all query-server
+		// work on the configured DuckDB session. Sync mode shares the writer's
+		// session so DuckDB-backed catalogs expose commits without a stale cache.
+		db.SetMaxOpenConns(1)
+		if cfg.DuckLakeDB == nil {
+			if err := ducklake.Configure(context.Background(), db, ducklake.Config{
+				CatalogPath:  cfg.DuckLakeCatalog,
+				CatalogStore: cfg.DuckLakeCatalogStore,
+				DataPath:     cfg.DuckLakeDataPath,
+				S3Endpoint:   cfg.S3Endpoint,
+				S3Region:     cfg.S3Region,
+			}); err != nil {
+				closeOnError()
+				return nil, fmt.Errorf("configure ducklake: %w", err)
+			}
+		}
+		if err := configureDuckLakeQuerySession(db); err != nil {
+			closeOnError()
+			return nil, err
 		}
 	} else {
 		conn, _ := db.Conn(context.Background())
 		// configure DuckDB on a specific connection
 		configureDuckDBPerConn(context.Background(), conn, cfg)
 		if err := configureDuckDB(db, cfg); err != nil {
-			db.Close()
+			closeOnError()
 			return nil, fmt.Errorf("configure duckdb: %w", err)
 		}
 		catalog = NewTableCatalog(s3Client, cfg.S3Bucket, cfg.S3Prefix, logger)
 	}
 
 	return &Server{
-		cfg:     cfg,
-		catalog: catalog,
-		duckDB:  db,
-		logger:  logger,
+		cfg:        cfg,
+		catalog:    catalog,
+		duckDB:     db,
+		ownsDuckDB: ownsDuckDB,
+		logger:     logger,
 	}, nil
+}
+
+func configureDuckLakeQuerySession(db *sql.DB) error {
+	if _, err := db.Exec("USE streambed"); err != nil {
+		return fmt.Errorf("use ducklake catalog: %w", err)
+	}
+	// Match PostgreSQL's usual default schema while retaining DuckLake's main
+	// schema as a fallback. Missing schemas in the search path are allowed.
+	if _, err := db.Exec("SET search_path = 'streambed.public,streambed.main'"); err != nil {
+		return fmt.Errorf("configure ducklake search path: %w", err)
+	}
+	return nil
+}
+
+// SetDuckLakeDB moves an in-process query server to a replacement writer
+// connection after pipeline reconnection.
+func (s *Server) SetDuckLakeDB(db *sql.DB) error {
+	if s.cfg.TargetFormat != "ducklake" {
+		return fmt.Errorf("cannot replace DuckDB connection for %s target", s.cfg.TargetFormat)
+	}
+	if s.ownsDuckDB {
+		return fmt.Errorf("cannot replace query server-owned DuckDB connection")
+	}
+	db.SetMaxOpenConns(1)
+	if err := configureDuckLakeQuerySession(db); err != nil {
+		return err
+	}
+	s.duckDBMu.Lock()
+	s.duckDB = db
+	s.duckDBMu.Unlock()
+	return nil
 }
 
 // configureDuckDBPerConn configures DuckDB on a specific connection -- delete it
@@ -189,16 +248,17 @@ func configureDuckDB(db *sql.DB, cfg ServerConfig) error {
 }
 
 // Start begins listening for Postgres client connections and serving queries.
-// It performs an initial catalog refresh, starts a background refresh goroutine,
-// and blocks until ctx is cancelled.
+// Iceberg mode refreshes discovered views in the background; DuckLake mode uses
+// its attached catalog directly. Start blocks until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) error {
-	// Initial catalog refresh and view registration
-	if err := s.refreshAndRegister(ctx); err != nil {
-		s.logger.Warn("initial catalog refresh failed (will retry)", "error", err)
+	// Iceberg tables must be discovered in S3 and exposed as views. DuckLake
+	// tables are already visible through the directly attached catalog.
+	if s.cfg.TargetFormat != "ducklake" {
+		if err := s.refreshAndRegister(ctx); err != nil {
+			s.logger.Warn("initial catalog refresh failed (will retry)", "error", err)
+		}
+		go s.refreshLoop(ctx)
 	}
-
-	// Periodic catalog refresh in background
-	go s.refreshLoop(ctx)
 
 	// Create psql-wire server
 	srv, err := wire.NewServer(s.handleParse,
@@ -240,6 +300,9 @@ func (s *Server) handleParse(ctx context.Context, query string) (wire.PreparedSt
 	}
 
 	s.logger.Debug("query received", "query", query)
+
+	s.duckDBMu.RLock()
+	defer s.duckDBMu.RUnlock()
 
 	// Execute query against DuckDB
 	rows, err := s.duckDB.QueryContext(ctx, query)
@@ -311,9 +374,8 @@ func (s *Server) handleParse(ctx context.Context, query string) (wire.PreparedSt
 // If DuckDB's engine was invalidated by a FATAL error (e.g., corrupt Iceberg
 // table), it re-opens the DuckDB instance and retries view registration.
 func (s *Server) refreshAndRegister(ctx context.Context) error {
-	if s.cfg.TargetFormat == "ducklake" {
-		return s.registerDuckLakeViews(ctx)
-	}
+	s.duckDBMu.Lock()
+	defer s.duckDBMu.Unlock()
 	if err := s.catalog.Refresh(ctx); err != nil {
 		return err
 	}
@@ -340,49 +402,6 @@ func (s *Server) refreshAndRegister(ctx context.Context) error {
 	return s.catalog.RegisterViews(s.duckDB)
 }
 
-func (s *Server) registerDuckLakeViews(ctx context.Context) error {
-	const catalogName = "streambed"
-	rows, err := s.duckDB.QueryContext(ctx,
-		"SELECT table_schema, table_name FROM information_schema.tables WHERE table_catalog = ? AND table_type = 'BASE TABLE'",
-		catalogName,
-	)
-	if err != nil {
-		return fmt.Errorf("list ducklake tables: %w", err)
-	}
-	defer rows.Close()
-	type tableInfo struct {
-		schema string
-		table  string
-	}
-	var tables []tableInfo
-	nameCount := map[string]int{}
-	for rows.Next() {
-		var info tableInfo
-		if err := rows.Scan(&info.schema, &info.table); err != nil {
-			return err
-		}
-		tables = append(tables, info)
-		nameCount[info.table]++
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, info := range tables {
-		src := fmt.Sprintf("%s.%s.%s", quoteIdent(catalogName), quoteIdent(info.schema), quoteIdent(info.table))
-		qualified := quoteIdent(info.schema + "_" + info.table)
-		if _, err := s.duckDB.ExecContext(ctx, fmt.Sprintf("CREATE OR REPLACE VIEW %s AS SELECT * FROM %s", qualified, src)); err != nil {
-			return fmt.Errorf("register ducklake view %s_%s: %w", info.schema, info.table, err)
-		}
-		if nameCount[info.table] == 1 {
-			if _, err := s.duckDB.ExecContext(ctx, fmt.Sprintf("CREATE OR REPLACE VIEW %s AS SELECT * FROM %s", quoteIdent(info.table), src)); err != nil {
-				return fmt.Errorf("register ducklake view %s: %w", info.table, err)
-			}
-		}
-	}
-	s.logger.Info("ducklake views registered", "count", len(tables))
-	return nil
-}
-
 // refreshLoop periodically refreshes the catalog and re-registers views.
 func (s *Server) refreshLoop(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
@@ -402,6 +421,11 @@ func (s *Server) refreshLoop(ctx context.Context) {
 
 // Close shuts down the DuckDB connection.
 func (s *Server) Close() error {
+	if !s.ownsDuckDB {
+		return nil
+	}
+	s.duckDBMu.Lock()
+	defer s.duckDBMu.Unlock()
 	return s.duckDB.Close()
 }
 
@@ -455,8 +479,4 @@ func normalizeValue(v any) any {
 	default:
 		return v
 	}
-}
-
-func quoteIdent(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
