@@ -3,6 +3,7 @@
 This benchmark compares Streambed's lakehouse writer/read path across:
 
 - Iceberg COW
+- Iceberg MOR/equality deletes
 - DuckLake with SQLite catalog
 - DuckLake with DuckDB catalog
 
@@ -38,6 +39,20 @@ STREAMBED_LAKEHOUSE_BENCH_FLUSH_ROWS=500,1000,10000 \
 STREAMBED_LAKEHOUSE_BENCH_QUERY_RUNS=7 \
 STREAMBED_LAKEHOUSE_BENCH_OUTPUT=/tmp/streambed-bench/lakehouse-matrix-1m-500plus.json \
 go test -timeout 60m -tags integration -run TestLakehouseFeatureBenchmark -count=1 ./test/integration -v
+```
+
+MOR is opt-in because read validation can be slow when equality deletes accumulate:
+
+```bash
+STREAMBED_RUN_LAKEHOUSE_FEATURE_BENCH=1 \
+STREAMBED_LAKEHOUSE_BENCH_ROWS=1000000 \
+STREAMBED_LAKEHOUSE_BENCH_FLUSH_ROWS=1000 \
+STREAMBED_LAKEHOUSE_BENCH_QUERY_RUNS=7 \
+STREAMBED_LAKEHOUSE_BENCH_INCLUDE_MOR=1 \
+STREAMBED_LAKEHOUSE_BENCH_OUTPUT=/tmp/streambed-bench/lakehouse-mor-1m-flush1000.json \
+go test -timeout 45m -tags integration \
+  -run 'TestLakehouseFeatureBenchmark/iceberg-mor/update-10pct/flush=1000' \
+  -count=1 ./test/integration -v
 ```
 
 ## Workload
@@ -81,6 +96,7 @@ Read queries:
 - It measures writer/catalog commit performance plus DuckDB reads over local MinIO.
 - Results are from a local Apple M3 Max development machine with a dirty git tree while the benchmark harness was under development. Use these as a baseline snapshot, not an absolute production claim.
 - The 1M / `flush=100` Iceberg COW matrix did not complete within the 90 minute test timeout; only DuckLake results are captured for that flush size.
+- Iceberg MOR is currently captured for one targeted 1M update scenario. It is included to separate Iceberg's COW write amplification from the MOR read-time delete-merge tradeoff.
 
 ## Committed result snapshots
 
@@ -121,24 +137,24 @@ Values are `write_duration_ms` with total object count in parentheses.
 
 Values are `write_duration_ms` with total object count in parentheses.
 
-| scenario | flush | iceberg-cow | ducklake-sqlite | ducklake-duckdb |
-|---|---:|---:|---:|---:|
-| append | 100 | — | 6,630 (1,005) | 5,597 (1,005) |
-| update 10% | 100 | — | 103,336 (4,005) | 97,904 (4,005) |
-| delete 10% | 100 | — | 29,966 (1,005) | 26,780 (1,005) |
-| mixed | 100 | — | 205,288 (6,005) | 196,791 (6,005) |
-| append | 500 | 4,468 (806) | 1,558 (205) | 1,206 (205) |
-| update 10% | 500 | 539,958 (1,606) | 14,277 (805) | 13,308 (805) |
-| delete 10% | 500 | 256,689 (806) | 5,639 (205) | 5,325 (205) |
-| mixed | 500 | 804,298 (3,206) | 29,479 (1,205) | 28,312 (1,205) |
-| append | 1,000 | 2,227 (406) | 955 (105) | 732 (105) |
-| update 10% | 1,000 | 269,344 (806) | 7,075 (405) | 6,576 (405) |
-| delete 10% | 1,000 | 128,079 (406) | 2,877 (105) | 2,724 (105) |
-| mixed | 1,000 | 399,228 (1,606) | 13,989 (605) | 13,576 (605) |
-| append | 10,000 | 242 (46) | 246 (15) | 208 (15) |
-| update 10% | 10,000 | 26,999 (86) | 891 (45) | 834 (45) |
-| delete 10% | 10,000 | 12,836 (46) | 416 (15) | 405 (15) |
-| mixed | 10,000 | 40,040 (166) | 1,792 (65) | 1,697 (65) |
+| scenario | flush | iceberg-cow | iceberg-mor | ducklake-sqlite | ducklake-duckdb |
+|---|---:|---:|---:|---:|---:|
+| append | 100 | — | — | 6,630 (1,005) | 5,597 (1,005) |
+| update 10% | 100 | — | — | 103,336 (4,005) | 97,904 (4,005) |
+| delete 10% | 100 | — | — | 29,966 (1,005) | 26,780 (1,005) |
+| mixed | 100 | — | — | 205,288 (6,005) | 196,791 (6,005) |
+| append | 500 | 4,468 (806) | — | 1,558 (205) | 1,206 (205) |
+| update 10% | 500 | 539,958 (1,606) | — | 14,277 (805) | 13,308 (805) |
+| delete 10% | 500 | 256,689 (806) | — | 5,639 (205) | 5,325 (205) |
+| mixed | 500 | 804,298 (3,206) | — | 29,479 (1,205) | 28,312 (1,205) |
+| append | 1,000 | 2,227 (406) | — | 955 (105) | 732 (105) |
+| update 10% | 1,000 | 269,344 (806) | 4,665 (1,206) | 7,075 (405) | 6,576 (405) |
+| delete 10% | 1,000 | 128,079 (406) | — | 2,877 (105) | 2,724 (105) |
+| mixed | 1,000 | 399,228 (1,606) | — | 13,989 (605) | 13,576 (605) |
+| append | 10,000 | 242 (46) | — | 246 (15) | 208 (15) |
+| update 10% | 10,000 | 26,999 (86) | — | 891 (45) | 834 (45) |
+| delete 10% | 10,000 | 12,836 (46) | — | 416 (15) | 405 (15) |
+| mixed | 10,000 | 40,040 (166) | — | 1,792 (65) | 1,697 (65) |
 
 ## Example read medians: 1M baseline, flush=1,000
 
@@ -150,6 +166,7 @@ Values are median milliseconds across 7 query runs.
 | append | ducklake-sqlite | 10 | 4 | 3 | 8 |
 | append | ducklake-duckdb | 8 | 2 | 2 | 6 |
 | update 10% | iceberg-cow | 42 | 14 | 15 | 52 |
+| update 10% | iceberg-mor | 86,786 | 272 | 272 | 85,077 |
 | update 10% | ducklake-sqlite | 17 | 4 | 4 | 22 |
 | update 10% | ducklake-duckdb | 16 | 2 | 2 | 21 |
 | delete 10% | iceberg-cow | 36 | 12 | 14 | 48 |
@@ -161,4 +178,4 @@ Values are median milliseconds across 7 query runs.
 
 ## Takeaway
 
-With realistic small CDC flush sizes, DuckLake is materially faster than Iceberg COW for mutation-heavy workloads. DuckDB catalog is usually faster than SQLite catalog, especially for point/range reads and commit-heavy workloads. Iceberg remains useful for broad ecosystem interoperability, but DuckLake better matches Streambed's DuckDB-centered query path and small-batch CDC mutation workload.
+With realistic small CDC flush sizes, DuckLake is materially faster than Iceberg COW for mutation-heavy workloads. Iceberg MOR changes that tradeoff: in the targeted 1M update run, MOR made the write path much faster than COW, but reads became much slower because equality deletes must be applied at query time until compaction catches up. DuckDB catalog is usually faster than SQLite catalog, especially for point/range reads and commit-heavy workloads. Iceberg remains useful for broad ecosystem interoperability, but DuckLake better matches Streambed's DuckDB-centered query path and small-batch CDC mutation workload.

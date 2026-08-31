@@ -734,6 +734,51 @@
     },
     {
       "target": {
+        "name": "iceberg-mor",
+        "format": "iceberg",
+        "iceberg_mutation": "mor"
+      },
+      "scenario": {
+        "name": "update-10pct",
+        "baseline_rows": 1000000,
+        "insert_rows": 0,
+        "update_rows": 100000,
+        "delete_rows": 0,
+        "flush_rows": 1000
+      },
+      "baseline_load_duration_ms": 1295,
+      "write_duration_ms": 4665,
+      "flush_count": 200,
+      "final_rows": 1000000,
+      "data_objects": 401,
+      "delete_objects": 200,
+      "total_objects": 1206,
+      "total_object_bytes": 37135970,
+      "queries": [
+        {
+          "name": "full_aggregate",
+          "median_ms": 86786,
+          "p95_ms": 87609
+        },
+        {
+          "name": "selective_range",
+          "median_ms": 272,
+          "p95_ms": 290
+        },
+        {
+          "name": "point_lookup",
+          "median_ms": 272,
+          "p95_ms": 279
+        },
+        {
+          "name": "topn_ordered",
+          "median_ms": 85077,
+          "p95_ms": 86677
+        }
+      ]
+    },
+    {
+      "target": {
         "name": "ducklake-sqlite",
         "format": "ducklake",
         "ducklake_catalog": "sqlite"
@@ -1637,6 +1682,7 @@
     "This benchmark bypasses Postgres logical replication and exercises writer + catalog commit + DuckDB reads only.",
     "Baseline load is performed as one bulk flush and reported separately; write_duration_ms measures only the scenario workload at the configured flush_rows.",
     "Iceberg and DuckLake write data to local MinIO; DuckLake catalog is local SQLite or DuckDB as configured.",
-    "Read timings include DuckDB query execution over the produced lake but do not include psql-wire server overhead."
+    "Read timings include DuckDB query execution over the produced lake but do not include psql-wire server overhead.",
+    "The Iceberg MOR row was captured in a targeted rerun for the 1M update-10pct flush=1000 scenario with STREAMBED_LAKEHOUSE_BENCH_INCLUDE_MOR=1."
   ]
 }
