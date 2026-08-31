@@ -11,6 +11,25 @@ import (
 	_ "github.com/duckdb/duckdb-go/v2"
 )
 
+func TestNormalizeDuckDBUUID(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	defer db.Close()
+
+	var value any
+	if err := db.QueryRow(`SELECT UUID '550e8400-e29b-41d4-a716-446655440000'`).Scan(&value); err != nil {
+		t.Fatalf("scan UUID: %v", err)
+	}
+	if _, ok := value.([]byte); !ok {
+		t.Fatalf("UUID scan returned %T, want []byte", value)
+	}
+	if got := normalizeValue(value, "UUID"); got != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Fatalf("normalize UUID = %v, want canonical string", got)
+	}
+}
+
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }

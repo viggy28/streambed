@@ -10,6 +10,7 @@ import (
 	"time"
 
 	duckdb "github.com/duckdb/duckdb-go/v2"
+	"github.com/google/uuid"
 
 	wire "github.com/jeroenrinzema/psql-wire"
 	"github.com/viggy28/streambed/internal/ducklake"
@@ -203,6 +204,11 @@ func (s *Server) Start(ctx context.Context) error {
 	// Create psql-wire server
 	srv, err := wire.NewServer(s.handleParse,
 		wire.Logger(s.logger),
+		// pgx requires this Postgres ParameterStatus before it will use the
+		// simple query protocol. DuckDB also follows standard string escaping.
+		wire.GlobalParameters(wire.Parameters{
+			wire.ParameterStatus("standard_conforming_strings"): "on",
+		}),
 	)
 	if err != nil {
 		return fmt.Errorf("create wire server: %w", err)
@@ -280,7 +286,7 @@ func (s *Server) handleParse(ctx context.Context, query string) (wire.PreparedSt
 		}
 		// Normalize DuckDB-specific value types that psql-wire can't encode directly.
 		for i, v := range vals {
-			vals[i] = normalizeValue(v)
+			vals[i] = normalizeValue(v, colTypes[i].DatabaseTypeName())
 		}
 		resultRows = append(resultRows, vals)
 	}
@@ -443,7 +449,7 @@ func duckDBTypeToOID(typeName string) uint32 {
 // normalizeValue converts DuckDB-specific value types into plain Go types
 // that psql-wire's text encoder can handle. Anything it doesn't recognize
 // is returned unchanged.
-func normalizeValue(v any) any {
+func normalizeValue(v any, databaseType string) any {
 	switch x := v.(type) {
 	case duckdb.Decimal:
 		return x.String()
@@ -452,6 +458,20 @@ func normalizeValue(v any) any {
 			return nil
 		}
 		return x.String()
+	case []byte:
+		if strings.EqualFold(databaseType, "UUID") && len(x) == 16 {
+			if id, err := uuid.FromBytes(x); err == nil {
+				return id.String()
+			}
+		}
+		return x
+	case duckdb.UUID:
+		return uuid.UUID(x).String()
+	case *duckdb.UUID:
+		if x == nil {
+			return nil
+		}
+		return uuid.UUID(*x).String()
 	default:
 		return v
 	}

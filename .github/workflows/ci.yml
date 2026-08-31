@@ -55,6 +55,9 @@ jobs:
           -run 'TestEndToEnd$|TestEndToEndUpdateDelete$|TestSchemaEvolution_AddColumn$|TestMutationModesDuckDBCorrectness/cow$'
           ./test/integration
 
+      - name: Query compatibility oracle
+        run: go test -tags integration -v -timeout 10m ./test/querycompat
+
       - name: Stop services
         if: always()
         run: docker compose -f test/integration/docker-compose.yml down -v
@@ -76,6 +79,9 @@ jobs:
 
       - name: Full integration tests
         run: go test -tags integration -short -v -timeout 30m ./test/integration/...
+
+      - name: Query compatibility oracle
+        run: go test -tags integration -v -timeout 10m ./test/querycompat
 
       - name: Stop services
         if: always()
