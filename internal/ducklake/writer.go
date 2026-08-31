@@ -27,6 +27,7 @@ type Config struct {
 	S3Endpoint   string
 	S3Region     string
 	CatalogName  string
+	ReadOnly     bool
 }
 
 type Writer struct {
@@ -143,10 +144,16 @@ func Configure(ctx context.Context, db *sql.DB, cfg Config) error {
 			return fmt.Errorf("exec %q: %w", stmt, err)
 		}
 	}
-	attach := fmt.Sprintf("ATTACH '%s' AS %s (DATA_PATH '%s')",
+	attachOptions := []string{
+		fmt.Sprintf("DATA_PATH '%s'", strings.ReplaceAll(cfg.DataPath, "'", "''")),
+	}
+	if cfg.ReadOnly {
+		attachOptions = append(attachOptions, "READ_ONLY")
+	}
+	attach := fmt.Sprintf("ATTACH '%s' AS %s (%s)",
 		duckLakeAttachPath(cfg.CatalogPath, catalogStore),
 		quoteIdent(catalogName(cfg)),
-		strings.ReplaceAll(cfg.DataPath, "'", "''"),
+		strings.Join(attachOptions, ", "),
 	)
 	if _, err := db.ExecContext(ctx, attach); err != nil {
 		return fmt.Errorf("attach ducklake catalog: %w", err)
