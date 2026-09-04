@@ -87,6 +87,58 @@ func TestDuckLakeServerUsesAttachedCatalogDirectly(t *testing.T) {
 	}
 }
 
+func TestDuckLakeServerStartsBeforePublicSchemaExists(t *testing.T) {
+	for _, store := range []string{"duckdb", "sqlite"} {
+		t.Run(store, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			catalogPath := filepath.Join(dir, "catalog."+store)
+			dataPath := filepath.Join(dir, "data") + "/"
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+			writer, err := ducklake.NewWriter(ctx, ducklake.Config{
+				CatalogPath:  catalogPath,
+				CatalogStore: store,
+				DataPath:     dataPath,
+			}, nil, 100, time.Hour, logger)
+			if err != nil {
+				t.Fatalf("ducklake writer: %v", err)
+			}
+			defer writer.Close()
+
+			// The catalog has main at this point, but no PostgreSQL public schema.
+			srv, err := NewServer(ServerConfig{
+				ListenAddr:           ":0",
+				TargetFormat:         "ducklake",
+				DuckLakeCatalog:      catalogPath,
+				DuckLakeCatalogStore: store,
+				DuckLakeDataPath:     dataPath,
+			}, nil, logger)
+			if err != nil {
+				t.Fatalf("NewServer with empty catalog: %v", err)
+			}
+			defer srv.Close()
+
+			var currentSchema string
+			if err := srv.duckDB.QueryRow(`SELECT current_schema()`).Scan(&currentSchema); err != nil {
+				t.Fatalf("current schema: %v", err)
+			}
+			if currentSchema != "main" {
+				t.Fatalf("current schema = %q, want main", currentSchema)
+			}
+
+			writeDuckLakeRow(t, writer, "orders", 1, "alice")
+			if err := writer.FlushAll(ctx); err != nil {
+				t.Fatalf("flush first public table: %v", err)
+			}
+
+			// Resetting the per-query session must notice public and make the new
+			// table available without restarting the server.
+			assertDuckLakeCount(t, srv, `orders`, 1)
+		})
+	}
+}
+
 func TestDuckLakeServerAttachesCatalogInStandaloneMode(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

@@ -120,9 +120,25 @@ func configureDuckLakeQuerySession(db *sql.DB) error {
 	if _, err := db.Exec("USE streambed"); err != nil {
 		return fmt.Errorf("use ducklake catalog: %w", err)
 	}
-	// Match PostgreSQL's usual default schema while retaining DuckLake's main
-	// schema as a fallback. Missing schemas in the search path are allowed.
-	if _, err := db.Exec("SET search_path = 'streambed.public,streambed.main'"); err != nil {
+
+	// A new DuckLake catalog contains main, but public is only created when the
+	// writer first sees a PostgreSQL relation. DuckDB rejects a search path that
+	// names a missing catalog schema, so include public only after it exists.
+	// DuckLake query sessions are recreated before every client query, which
+	// makes public the preferred schema as soon as the writer creates it.
+	var publicExists bool
+	if err := db.QueryRow(`
+		SELECT count(*) > 0
+		FROM information_schema.schemata
+		WHERE catalog_name = 'streambed' AND schema_name = 'public'
+	`).Scan(&publicExists); err != nil {
+		return fmt.Errorf("check ducklake public schema: %w", err)
+	}
+	searchPath := "streambed.main"
+	if publicExists {
+		searchPath = "streambed.public,streambed.main"
+	}
+	if _, err := db.Exec("SET search_path = '" + searchPath + "'"); err != nil {
 		return fmt.Errorf("configure ducklake search path: %w", err)
 	}
 	return nil
