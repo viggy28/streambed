@@ -17,7 +17,7 @@ type Config struct {
 	StatePath            string
 	TargetFormat         string // lakehouse target: "iceberg" or "ducklake"
 	DuckLakeCatalog      string // catalog DB path for DuckLake metadata
-	DuckLakeCatalogStore string // DuckLake catalog store: "sqlite" (default) or "duckdb"
+	DuckLakeCatalogStore string // DuckLake catalog store: "duckdb" (default) or "sqlite"
 	DuckLakeDataPath     string // DuckLake data path (defaults to s3://bucket/prefix/ducklake/)
 	SlotName             string
 	FlushRows            int
@@ -37,7 +37,7 @@ func Default() *Config {
 		StatePath:            defaultStatePath(),
 		TargetFormat:         "iceberg",
 		DuckLakeCatalog:      defaultDuckLakeCatalogPath(),
-		DuckLakeCatalogStore: "sqlite",
+		DuckLakeCatalogStore: "duckdb",
 		SlotName:             "streambed",
 		FlushRows:            10000,
 		FlushInterval:        2 * time.Second,
@@ -58,9 +58,9 @@ func defaultStatePath() string {
 func defaultDuckLakeCatalogPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ".streambed/ducklake-catalog.sqlite"
+		return ".streambed/ducklake-catalog.duckdb"
 	}
-	return home + "/.streambed/ducklake-catalog.sqlite"
+	return home + "/.streambed/ducklake-catalog.duckdb"
 }
 
 // Load reads configuration from environment variables.

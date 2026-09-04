@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -35,11 +36,16 @@ func TestDefaults(t *testing.T) {
 	if cfg.TargetFormat != "iceberg" {
 		t.Errorf("expected TargetFormat 'iceberg', got %q", cfg.TargetFormat)
 	}
-	if cfg.DuckLakeCatalog == "" {
-		t.Error("expected DuckLakeCatalog default")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("user home directory: %v", err)
 	}
-	if cfg.DuckLakeCatalogStore != "sqlite" {
-		t.Errorf("expected DuckLakeCatalogStore 'sqlite', got %q", cfg.DuckLakeCatalogStore)
+	wantCatalog := filepath.Join(home, ".streambed", "ducklake-catalog.duckdb")
+	if cfg.DuckLakeCatalog != wantCatalog {
+		t.Errorf("expected DuckLakeCatalog %q, got %q", wantCatalog, cfg.DuckLakeCatalog)
+	}
+	if cfg.DuckLakeCatalogStore != "duckdb" {
+		t.Errorf("expected DuckLakeCatalogStore 'duckdb', got %q", cfg.DuckLakeCatalogStore)
 	}
 }
 
@@ -112,6 +118,19 @@ func TestLoadFromEnv(t *testing.T) {
 	}
 	if got := cfg.EffectiveDuckLakeDataPath(); got != "s3://my-bucket/data/ducklake/" {
 		t.Errorf("expected normalized DuckLake data path, got %q", got)
+	}
+}
+
+func TestLoadExplicitSQLiteCatalogFromEnv(t *testing.T) {
+	t.Setenv("STREAMBED_DUCKLAKE_CATALOG", "/tmp/legacy-ducklake.sqlite")
+	t.Setenv("STREAMBED_DUCKLAKE_CATALOG_STORE", "sqlite")
+
+	cfg := Load()
+	if cfg.DuckLakeCatalog != "/tmp/legacy-ducklake.sqlite" {
+		t.Fatalf("DuckLakeCatalog = %q, want explicit SQLite path", cfg.DuckLakeCatalog)
+	}
+	if cfg.DuckLakeCatalogStore != "sqlite" {
+		t.Fatalf("DuckLakeCatalogStore = %q, want sqlite", cfg.DuckLakeCatalogStore)
 	}
 }
 
