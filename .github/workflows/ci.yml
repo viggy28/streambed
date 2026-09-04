@@ -52,7 +52,7 @@ jobs:
       - name: Integration smoke tests
         run: >
           go test -tags integration -short -v -timeout 8m
-          -run 'TestEndToEnd$|TestEndToEndUpdateDelete$|TestSchemaEvolution_AddColumn$|TestMutationModesDuckDBCorrectness/cow$'
+          -run 'TestEndToEnd$|TestEndToEndUpdateDelete$|TestSchemaEvolution_AddColumn$|TestMutationModesDuckDBCorrectness/cow$|TestCDCDataIntegrityOracle$'
           ./test/integration
 
       - name: Query compatibility oracle
