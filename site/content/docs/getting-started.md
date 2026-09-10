@@ -9,6 +9,7 @@ prev: /docs
 
 - Go 1.22+ with CGO enabled (required for go-duckdb and go-sqlite3)
 - Docker (for local Postgres and MinIO)
+- PostgreSQL client CLI (`psql`)
 
 ## Quick Start
 
