@@ -13,9 +13,6 @@ prev: /docs
 
 ## Quick Start
 
-> **Note:** If you already have Postgres running on port `5432`, the `docker compose up` command will fail with a "bind: address already in use" error.
-> In that case, change the host port mapping in `docker-compose.yml` (e.g. `"5433:5432"`) and update the `--source-url` flag accordingly (e.g. `localhost:5433`).
-
 ```bash
 # Start Postgres + MinIO locally
 docker compose up -d
@@ -36,6 +33,9 @@ psql -h localhost -p 5433 -U postgres -d postgres
 ```
 
 Run `streambed sync --help` for all configuration options. All flags support environment variables with `STREAMBED_` prefix (e.g. `STREAMBED_SOURCE_URL`).
+
+> **Note:** If you already have Postgres running on port `5432`, `docker compose up` will fail with a "bind: address already in use" error.
+> In that case, change the host port mapping in `docker-compose.yml` (e.g. `"5433:5432"`) and update the `--source-url` flag accordingly (e.g. `localhost:5433`).
 
 ## How It Works
 
