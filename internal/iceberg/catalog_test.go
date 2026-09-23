@@ -164,6 +164,34 @@ func TestAppendSnapshotsPublishExactTotalRecords(t *testing.T) {
 	}
 }
 
+func TestListSnapshotsReturnsRetainedMetadata(t *testing.T) {
+	ctx := context.Background()
+	mem := storage.NewMemS3Client("test-bucket")
+	catalog := NewCatalog(mem, "test-bucket", "test")
+
+	if _, err := catalog.CreateTable(ctx, "public", "events", []ColumnDef{{Name: "id", OID: 23}}); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if err := catalog.CommitSnapshot(ctx, "public", "events", DataFile{Path: "data/1.parquet", RowCount: 1, FileSize: 100}, "0/10"); err != nil {
+		t.Fatalf("commit snapshot: %v", err)
+	}
+
+	snapshots, err := catalog.ListSnapshots(ctx, "public", "events")
+	if err != nil {
+		t.Fatalf("list snapshots: %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("got %d snapshots, want 1", len(snapshots))
+	}
+	got := snapshots[0]
+	if got.SnapshotID == 0 || got.SequenceNumber != 1 || got.Timestamp.IsZero() {
+		t.Fatalf("incomplete snapshot metadata: %+v", got)
+	}
+	if got.Summary["operation"] != "append" || got.Summary["streambed.last_flush_lsn"] != "0/10" {
+		t.Fatalf("snapshot summary = %#v", got.Summary)
+	}
+}
+
 func TestEqualityDeleteHistoryOmitsUnknownTotalRecords(t *testing.T) {
 	snapshots := []snapshot{
 		{Summary: map[string]string{"added-records": "10", "total-records": "10"}},

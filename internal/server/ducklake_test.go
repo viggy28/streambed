@@ -87,6 +87,88 @@ func TestDuckLakeServerUsesAttachedCatalogDirectly(t *testing.T) {
 	}
 }
 
+func TestDuckLakeServerHistoricalJoinAtTimestamp(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	catalogPath := filepath.Join(dir, "catalog.ducklake")
+	dataPath := filepath.Join(dir, "data") + "/"
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	writer, err := ducklake.NewWriter(ctx, ducklake.Config{
+		CatalogPath: catalogPath, CatalogStore: "duckdb", DataPath: dataPath,
+	}, nil, 100, time.Hour, logger)
+	if err != nil {
+		t.Fatalf("ducklake writer: %v", err)
+	}
+	defer writer.Close()
+
+	writeDuckLakeRow(t, writer, "orders", 1, "old-order")
+	writeDuckLakeRow(t, writer, "customers", 1, "old-customer")
+	if err := writer.FlushAll(ctx); err != nil {
+		t.Fatalf("initial flush: %v", err)
+	}
+
+	srv, err := NewServer(ServerConfig{
+		TargetFormat: "ducklake", DuckLakeCatalog: catalogPath,
+		DuckLakeCatalogStore: "duckdb", DuckLakeDataPath: dataPath,
+	}, nil, logger)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer srv.Close()
+
+	var firstSnapshot time.Time
+	if err := srv.duckDB.QueryRow(`SELECT max(snapshot_time) FROM streambed.snapshots()`).Scan(&firstSnapshot); err != nil {
+		t.Fatalf("read initial snapshot time: %v", err)
+	}
+
+	updateDuckLakeRow(t, writer, "orders", 1, "new-order")
+	updateDuckLakeRow(t, writer, "customers", 1, "new-customer")
+	if err := writer.FlushAll(ctx); err != nil {
+		t.Fatalf("mutation flush: %v", err)
+	}
+	if err := srv.resetDuckLakeQueryDB(ctx); err != nil {
+		t.Fatalf("refresh query catalog: %v", err)
+	}
+	var secondSnapshot time.Time
+	if err := srv.duckDB.QueryRow(`SELECT max(snapshot_time) FROM streambed.snapshots()`).Scan(&secondSnapshot); err != nil {
+		t.Fatalf("read mutation snapshot time: %v", err)
+	}
+	if !secondSnapshot.After(firstSnapshot) {
+		t.Fatalf("mutation snapshot %s is not after initial snapshot %s", secondSnapshot, firstSnapshot)
+	}
+
+	// Use a point strictly between commits so the test does not depend on
+	// DuckLake's exact-boundary timestamp convention.
+	historicalTime := firstSnapshot.Add(secondSnapshot.Sub(firstSnapshot) / 2)
+	timestamp := historicalTime.UTC().Format("2006-01-02 15:04:05.999999999")
+	query := fmt.Sprintf(`
+		SELECT o.name, c.name
+		FROM public.orders AS o AT (TIMESTAMP => TIMESTAMPTZ '%s')
+		JOIN public.customers AS c AT (TIMESTAMP => TIMESTAMPTZ '%s') ON c.id = o.id`, timestamp, timestamp)
+	prepared, err := prepareTimeTravelQuery(ctx, query, "ducklake", nil)
+	if err != nil {
+		t.Fatalf("validate historical join: %v", err)
+	}
+	if _, err := srv.handleParse(ctx, query); err != nil {
+		t.Fatalf("historical join through query server: %v", err)
+	}
+	var orderName, customerName string
+	if err := srv.duckDB.QueryRow(prepared).Scan(&orderName, &customerName); err != nil {
+		t.Fatalf("historical join: %v", err)
+	}
+	if orderName != "old-order" || customerName != "old-customer" {
+		t.Fatalf("historical names = %q, %q; want old-order, old-customer", orderName, customerName)
+	}
+
+	if err := srv.duckDB.QueryRow(`SELECT o.name, c.name FROM public.orders o JOIN public.customers c ON c.id = o.id`).Scan(&orderName, &customerName); err != nil {
+		t.Fatalf("latest join: %v", err)
+	}
+	if orderName != "new-order" || customerName != "new-customer" {
+		t.Fatalf("latest names = %q, %q; want new-order, new-customer", orderName, customerName)
+	}
+}
+
 func TestDuckLakeServerAttachesCatalogInStandaloneMode(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -142,6 +224,25 @@ func writeDuckLakeRow(t *testing.T, writer *ducklake.Writer, table string, id in
 	})
 	if err != nil {
 		t.Fatalf("write %s row: %v", table, err)
+	}
+}
+
+func updateDuckLakeRow(t *testing.T, writer *ducklake.Writer, table string, id int, name string) {
+	t.Helper()
+	_, err := writer.HandleEvent(context.Background(), wal.RowEvent{
+		Schema:     "public",
+		Table:      table,
+		Columns:    []wal.Column{{Name: "id", OID: 23, IsKey: true}, {Name: "name", OID: 25}},
+		KeyColumns: []int{0},
+		Op:         wal.OpUpdate,
+		OldKey:     []wal.ColumnValue{{Name: "id", OID: 23, Value: []byte(fmt.Sprint(id))}},
+		Values: []wal.ColumnValue{
+			{Name: "id", OID: 23, Value: []byte(fmt.Sprint(id))},
+			{Name: "name", OID: 25, Value: []byte(name)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("update %s row: %v", table, err)
 	}
 }
 

@@ -20,6 +20,42 @@ type MaintenancePlan struct {
 	DeleteObjects    []string
 }
 
+// SnapshotInfo is the user-facing metadata for one retained Iceberg snapshot.
+type SnapshotInfo struct {
+	SnapshotID     int64
+	SequenceNumber int64
+	Timestamp      time.Time
+	Summary        map[string]string
+}
+
+// ListSnapshots returns retained snapshots for a table, newest first.
+func (c *Catalog) ListSnapshots(ctx context.Context, schema, table string) ([]SnapshotInfo, error) {
+	meta, _, _, err := c.readCurrentMetadata(ctx, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]SnapshotInfo, 0, len(meta.Snapshots))
+	for _, snap := range meta.Snapshots {
+		summary := make(map[string]string, len(snap.Summary))
+		for key, value := range snap.Summary {
+			summary[key] = value
+		}
+		result = append(result, SnapshotInfo{
+			SnapshotID:     snap.SnapshotID,
+			SequenceNumber: snap.SequenceNumber,
+			Timestamp:      time.UnixMilli(snap.TimestampMS).UTC(),
+			Summary:        summary,
+		})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Timestamp.Equal(result[j].Timestamp) {
+			return result[i].SequenceNumber > result[j].SequenceNumber
+		}
+		return result[i].Timestamp.After(result[j].Timestamp)
+	})
+	return result, nil
+}
+
 // ExpireSnapshots keeps the current snapshot plus retainLast most recent older
 // snapshots and deletes objects that are reachable only from expired snapshots.
 // It is intentionally conservative: it never deletes objects reachable from any

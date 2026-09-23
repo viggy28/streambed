@@ -144,6 +144,17 @@ func TestWriterInsertUpdateDeleteAndLSN(t *testing.T) {
 	if !found || lsn != lsn2.String() {
 		t.Fatalf("got lsn=%q found=%v, want %q true", lsn, found, lsn2.String())
 	}
+
+	snapshots, err := ListTableSnapshots(ctx, w.db, "streambed", "public", "orders")
+	if err != nil {
+		t.Fatalf("ListTableSnapshots: %v", err)
+	}
+	if len(snapshots) != 2 {
+		t.Fatalf("got %d table snapshots, want 2", len(snapshots))
+	}
+	if snapshots[0].LastFlushLSN != lsn2.String() || snapshots[0].Operation != "flush" || snapshots[0].SnapshotTime.IsZero() {
+		t.Fatalf("latest snapshot = %+v", snapshots[0])
+	}
 }
 
 func TestWriterSchemaChangeAndTruncate(t *testing.T) {
