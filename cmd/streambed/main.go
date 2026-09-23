@@ -395,6 +395,13 @@ func runSync(cmd *cobra.Command, args []string) error {
 	// not set this is the same server as pgConn.
 	primaryURL := cfg.EffectivePrimaryURL()
 	primaryReplStr := primaryURL
+	if !strings.Contains(primaryReplStr, "replication=") {
+		if strings.Contains(primaryReplStr, "?") {
+			primaryReplStr += "&replication=database"
+		} else {
+			primaryReplStr += "?replication=database"
+		}
+	}
 	setupConn, err := pgconn.Connect(ctx, primaryReplStr)
 	if err != nil {
 		return fmt.Errorf("connect to postgres (primary setup): %w", err)
@@ -416,8 +423,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("create publication: %w", err)
 	}
 
-	// Create or reuse replication slot on the streaming connection (replica if configured).
-	slotLSN, err := wal.CreateOrReuseSlot(ctx, pgConn, cfg.SlotName, logger)
+	// Create or reuse replication slot on the primary (so it syncs to the replica).
+	slotLSN, err := wal.CreateOrReuseSlot(ctx, setupConn, cfg.SlotName, logger)
 	if err != nil {
 		return fmt.Errorf("setup replication slot: %w", err)
 	}
@@ -546,8 +553,9 @@ func runSync(cmd *cobra.Command, args []string) error {
 			tableFlushLSN[fmt.Sprintf("%s.%s", t.Schema, t.Table)] = lsn
 		}
 
-		// Recompute startLSN from the streaming connection's slot state.
-		slotLSN, err = wal.CreateOrReuseSlot(ctx, pgConn, cfg.SlotName, logger)
+		// Recompute startLSN from the primary's slot state to ensure the slot exists
+		// (if it was dropped, we must recreate it on the primary).
+		slotLSN, err = wal.CreateOrReuseSlot(ctx, setupConn, cfg.SlotName, logger)
 		if err != nil {
 			logger.Error("reconnect: slot setup failed", "error", err)
 			continue
