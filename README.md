@@ -43,6 +43,36 @@ Run `streambed sync --help` for all configuration options. All flags support env
 
 Use `--target-file-size-mb` (or `STREAMBED_TARGET_FILE_SIZE_MB`) to split large flushes into approximately target-sized Parquet data files. The default is 128 MiB. This is a target, not a hard maximum; small flushes still create small files.
 
+### DuckLake catalog defaults
+
+With `--target-format=ducklake`, Streambed stores catalog metadata in a local
+DuckDB database by default:
+
+```text
+~/.streambed/ducklake-catalog.duckdb
+```
+
+Parquet data remains under `s3://<bucket>/<prefix>/ducklake/`. Both catalog
+settings can be overridden explicitly:
+
+```bash
+--ducklake-catalog=/path/to/catalog.duckdb \
+--ducklake-catalog-store=duckdb
+```
+
+SQLite catalogs remain supported with `--ducklake-catalog-store=sqlite`.
+Installations created before the DuckDB default must pass both legacy settings
+to continue using their existing catalog; Streambed does not silently migrate
+or overwrite it:
+
+```bash
+--ducklake-catalog="$HOME/.streambed/ducklake-catalog.sqlite" \
+--ducklake-catalog-store=sqlite
+```
+
+The equivalent environment variables are `STREAMBED_DUCKLAKE_CATALOG` and
+`STREAMBED_DUCKLAKE_CATALOG_STORE`.
+
 ## Architecture
 
 ![Architecture](/docs/architecture.svg)
