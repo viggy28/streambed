@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000">
+  <rect width="1600" height="1000" fill="#FBF6E9"/>
+  <style>
+    .hand { font-family: "Marker Felt", "Bradley Hand", cursive; fill: #2A2620; }
+    .code { font-family: "SFMono-Regular", "SF Mono", monospace; fill: #2A2620; }
+    .rough { fill: none; stroke: #2A2620; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
+    .faint { fill: none; stroke: #D8CDB2; stroke-width: 3; stroke-linecap: round; }
+    .blue { stroke: #3E7CB1; }
+    .red { stroke: #E4572E; }
+  </style>
+
+  <text x="800" y="85" text-anchor="middle" class="hand" font-size="54">What did this Postgres table look like at noon?</text>
+
+  <!-- query card -->
+  <g transform="rotate(-0.7 280 280)">
+    <rect x="65" y="170" width="455" height="245" rx="22" fill="#FFFDF7" stroke="#2A2620" stroke-width="5"/>
+    <path d="M72 177 Q286 163 515 180 M72 407 Q294 420 511 405" class="faint"/>
+    <text x="292" y="220" text-anchor="middle" class="hand" font-size="34">time travel query</text>
+    <text x="100" y="270" class="code" font-size="24">FROM orders AT (</text>
+    <text x="100" y="315" class="code" font-size="24" fill="#E4572E">  TIMESTAMP =&gt;</text>
+    <text x="100" y="352" class="code" font-size="22" fill="#E4572E">  TIMESTAMPTZ '12:00'</text>
+    <text x="100" y="390" class="code" font-size="24">)</text>
+  </g>
+
+  <!-- query arrow -->
+  <path d="M535 292 Q610 267 672 295" class="rough"/>
+  <path d="M653 279 L675 295 L652 307" class="rough"/>
+  <text x="600" y="248" text-anchor="middle" class="hand" font-size="27">asks</text>
+
+  <!-- Streambed box -->
+  <g transform="rotate(0.8 835 295)">
+    <rect x="680" y="205" width="310" height="178" rx="30" fill="#E7F0FC" stroke="#3E7CB1" stroke-width="6"/>
+    <path d="M690 213 Q835 196 981 216 M690 373 Q840 389 982 370" class="faint blue"/>
+    <text x="835" y="285" text-anchor="middle" class="hand" font-size="45">Streambed</text>
+    <text x="835" y="335" text-anchor="middle" class="hand" font-size="27">finds the cutoff</text>
+  </g>
+
+  <!-- result box -->
+  <path d="M1002 296 Q1075 275 1139 298" class="rough"/>
+  <path d="M1120 280 L1142 298 L1118 310" class="rough"/>
+  <text x="1070" y="252" text-anchor="middle" class="hand" font-size="27">returns</text>
+  <g transform="rotate(-0.5 1330 292)">
+    <rect x="1145" y="180" width="390" height="225" rx="25" fill="#FFFDF7" stroke="#2A2620" stroke-width="5"/>
+    <path d="M1154 188 Q1340 174 1527 191 M1154 396 Q1340 412 1526 393" class="faint"/>
+    <text x="1340" y="230" text-anchor="middle" class="hand" font-size="34">historical rows</text>
+    <text x="1190" y="290" class="code" font-size="23">id:     42</text>
+    <text x="1190" y="332" class="code" font-size="23">status: paid</text>
+    <text x="1190" y="374" class="code" font-size="23">total:  $95</text>
+  </g>
+
+  <!-- curved selection arrow -->
+  <path d="M835 395 Q830 478 755 555" class="rough blue"/>
+  <path d="M756 532 L754 558 L778 548" class="rough blue"/>
+  <text x="660" y="470" class="hand" font-size="30" fill="#3E7CB1">newest commit ≤ 12:00</text>
+
+  <!-- timeline -->
+  <text x="120" y="680" class="hand" font-size="32">retained snapshots</text>
+  <path d="M175 755 Q790 746 1425 758" class="rough"/>
+  <path d="M1410 742 L1430 758 L1408 771" class="rough"/>
+
+  <!-- snapshot 1 -->
+  <path d="M340 735 L340 775" class="rough"/>
+  <g transform="rotate(-0.8 340 850)">
+    <rect x="225" y="790" width="230" height="130" rx="18" fill="#FFFDF7" stroke="#2A2620" stroke-width="4"/>
+    <path d="M232 798 Q340 786 448 800" class="faint"/>
+    <text x="340" y="842" text-anchor="middle" class="hand" font-size="33">10:00</text>
+    <text x="340" y="888" text-anchor="middle" class="hand" font-size="25">status: pending</text>
+  </g>
+
+  <!-- selected snapshot -->
+  <path d="M755 735 L755 775" class="rough blue"/>
+  <g transform="rotate(0.7 755 850)">
+    <rect x="620" y="780" width="270" height="150" rx="20" fill="#E7F0FC" stroke="#3E7CB1" stroke-width="7"/>
+    <path d="M628 790 Q755 772 882 793 M629 920 Q755 939 883 916" class="faint blue"/>
+    <text x="755" y="832" text-anchor="middle" class="hand" font-size="38" fill="#3E7CB1">11:55</text>
+    <text x="755" y="878" text-anchor="middle" class="hand" font-size="27">status: paid</text>
+    <text x="755" y="910" text-anchor="middle" class="hand" font-size="24" fill="#3E7CB1">selected ✓</text>
+  </g>
+
+  <!-- cutoff -->
+  <path d="M1000 650 Q994 760 1003 936" class="rough red" stroke-dasharray="12 14"/>
+  <text x="1000" y="625" text-anchor="middle" class="hand" font-size="38" fill="#E4572E">12:00 cutoff</text>
+
+  <!-- later snapshot -->
+  <path d="M1245 735 L1245 775" class="rough" opacity="0.55"/>
+  <g transform="rotate(-0.5 1245 850)" opacity="0.55">
+    <rect x="1120" y="790" width="250" height="130" rx="18" fill="#FFFDF7" stroke="#2A2620" stroke-width="4"/>
+    <path d="M1128 798 Q1245 785 1363 801" class="faint"/>
+    <text x="1245" y="842" text-anchor="middle" class="hand" font-size="33">12:30</text>
+    <text x="1245" y="888" text-anchor="middle" class="hand" font-size="25">status: shipped</text>
+  </g>
+  <path d="M1075 865 Q1038 842 1018 805" class="rough red"/>
+  <text x="1090" y="950" class="hand" font-size="29" fill="#E4572E">too late — never used</text>
+</svg>
