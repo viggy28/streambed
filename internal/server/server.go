@@ -155,6 +155,7 @@ func configureDuckDBPerConn(ctx context.Context, con *sql.Conn, cfg ServerConfig
 		// which Postgres clients expect (e.g. NOW() - INTERVAL '7 days').
 		"INSTALL icu",
 		"LOAD icu",
+		"SET TimeZone = 'UTC'",
 	}
 
 	// Configure S3 access. Use GLOBAL scope so settings apply to every
@@ -210,6 +211,7 @@ func configureDuckDB(db *sql.DB, cfg ServerConfig) error {
 		// which Postgres clients expect (e.g. NOW() - INTERVAL '7 days').
 		"INSTALL icu",
 		"LOAD icu",
+		"SET TimeZone = 'UTC'",
 	}
 
 	// Configure S3 access. Use GLOBAL scope so settings apply to every
@@ -312,6 +314,11 @@ func (s *Server) handleParse(ctx context.Context, query string) (wire.PreparedSt
 
 	s.logger.Debug("query received", "query", query)
 
+	preparedQuery, err := prepareTimeTravelQuery(ctx, query, s.cfg.TargetFormat, s.catalog)
+	if err != nil {
+		return nil, fmt.Errorf("time travel query: %w", err)
+	}
+
 	s.duckDBMu.Lock()
 	defer s.duckDBMu.Unlock()
 	if s.cfg.TargetFormat == "ducklake" {
@@ -324,7 +331,7 @@ func (s *Server) handleParse(ctx context.Context, query string) (wire.PreparedSt
 	}
 
 	// Execute query against DuckDB
-	rows, err := s.duckDB.QueryContext(ctx, query)
+	rows, err := s.duckDB.QueryContext(ctx, preparedQuery)
 	if err != nil {
 		return nil, fmt.Errorf("query error: %w", err)
 	}

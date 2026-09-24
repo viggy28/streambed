@@ -113,6 +113,7 @@ func Configure(ctx context.Context, db *sql.DB, cfg Config) error {
 		"LOAD httpfs",
 		"INSTALL icu",
 		"LOAD icu",
+		"SET TimeZone = 'UTC'",
 	)
 	if cfg.S3Region != "" {
 		stmts = append(stmts, fmt.Sprintf("SET GLOBAL s3_region = '%s'", strings.ReplaceAll(cfg.S3Region, "'", "''")))
@@ -680,6 +681,67 @@ func (w *Writer) tableExists(ctx context.Context, schema, table string) (bool, e
 
 func (w *Writer) GetTableFlushLSN(ctx context.Context, schema, table string) (string, bool, error) {
 	return GetTableFlushLSN(ctx, w.db, w.catalogName, schema, table)
+}
+
+// SnapshotInfo describes a DuckLake catalog snapshot that changed a table.
+// Snapshot IDs and schema versions are catalog-wide, not per-table.
+type SnapshotInfo struct {
+	SnapshotID    int64
+	SnapshotTime  time.Time
+	SchemaVersion int64
+	Operation     string
+	CommitMessage string
+	LastFlushLSN  string
+}
+
+// ListTableSnapshots returns Streambed-authored snapshots that include the
+// requested table, newest first.
+func ListTableSnapshots(ctx context.Context, db *sql.DB, catalogName, schema, table string) ([]SnapshotInfo, error) {
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT snapshot_id, snapshot_time, schema_version, commit_message, commit_extra_info
+		FROM %s.snapshots()
+		WHERE commit_extra_info IS NOT NULL
+		ORDER BY snapshot_id DESC`, quoteIdent(catalogName)))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	target := schema + "." + table
+	var result []SnapshotInfo
+	for rows.Next() {
+		var info SnapshotInfo
+		var message, raw sql.NullString
+		if err := rows.Scan(&info.SnapshotID, &info.SnapshotTime, &info.SchemaVersion, &message, &raw); err != nil {
+			return nil, err
+		}
+		if !raw.Valid {
+			continue
+		}
+		var extra struct {
+			Table        string            `json:"streambed.table"`
+			Operation    string            `json:"streambed.op"`
+			LastFlushLSN string            `json:"streambed.last_flush_lsn"`
+			Tables       map[string]string `json:"streambed.tables"`
+		}
+		if err := json.Unmarshal([]byte(raw.String), &extra); err != nil {
+			continue
+		}
+		lsn, inBatch := extra.Tables[target]
+		if extra.Table != target && !inBatch {
+			continue
+		}
+		info.SnapshotTime = info.SnapshotTime.UTC()
+		info.Operation = extra.Operation
+		info.CommitMessage = message.String
+		if extra.LastFlushLSN != "" {
+			info.LastFlushLSN = extra.LastFlushLSN
+		} else {
+			info.LastFlushLSN = lsn
+		}
+		result = append(result, info)
+	}
+	return result, rows.Err()
 }
 
 func GetTableFlushLSN(ctx context.Context, db *sql.DB, catalogName, schema, table string) (string, bool, error) {

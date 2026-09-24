@@ -3,10 +3,14 @@ package server
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/viggy28/streambed/internal/storage"
 )
@@ -35,10 +39,10 @@ type TableCatalog struct {
 // NewTableCatalog creates a new catalog that discovers tables under the given S3 prefix.
 func NewTableCatalog(s3Client storage.ObjectStorage, bucket, prefix string, logger *slog.Logger) *TableCatalog {
 	return &TableCatalog{
-		s3Bucket: bucket,
-		s3Prefix: prefix,
-		s3Client: s3Client,
-		logger:   logger,
+		s3Bucket:    bucket,
+		s3Prefix:    prefix,
+		s3Client:    s3Client,
+		logger:      logger,
 		tables:      make(map[string]TableInfo),
 		emptyTables: make(map[string]bool),
 	}
@@ -107,18 +111,109 @@ func (c *TableCatalog) Tables() map[string]TableInfo {
 // Resolve returns the iceberg_scan() SQL expression for a table name.
 // Accepts both qualified ("public.orders") and unqualified ("orders") names.
 func (c *TableCatalog) Resolve(tableName string) (string, error) {
+	info, err := c.resolveTable(tableName)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("iceberg_scan('%s', allow_moved_paths = true)", escapeSQLString(info.S3Path)), nil
+}
+
+// ResolveAtTimestamp returns an Iceberg scan pinned to the newest retained
+// snapshot at or before at. Streambed resolves the timestamp itself because
+// the DuckDB Iceberg extension's timestamp lookup is not reliable for the
+// path-based tables Streambed writes.
+func (c *TableCatalog) ResolveAtTimestamp(ctx context.Context, tableName string, at time.Time) (string, error) {
+	info, err := c.resolveTable(tableName)
+	if err != nil {
+		return "", err
+	}
+	if c.s3Client == nil {
+		return "", fmt.Errorf("object storage is not initialized")
+	}
+
+	metadataPrefix := path.Join(c.s3Prefix, info.Schema, info.Table, "metadata")
+	hintData, err := c.s3Client.GetObject(ctx, path.Join(metadataPrefix, "version-hint.text"))
+	if err != nil {
+		return "", fmt.Errorf("read Iceberg version hint for %s: %w", tableName, err)
+	}
+	version, err := strconv.Atoi(strings.TrimSpace(string(hintData)))
+	if err != nil {
+		return "", fmt.Errorf("parse Iceberg version hint for %s: %w", tableName, err)
+	}
+	metadataData, err := c.s3Client.GetObject(ctx, path.Join(metadataPrefix, fmt.Sprintf("v%d.metadata.json", version)))
+	if err != nil {
+		return "", fmt.Errorf("read Iceberg metadata for %s: %w", tableName, err)
+	}
+	type icebergMetadata struct {
+		CurrentSnapshotID int64 `json:"current-snapshot-id"`
+		Snapshots         []struct {
+			SnapshotID     int64 `json:"snapshot-id"`
+			SequenceNumber int64 `json:"sequence-number"`
+			TimestampMS    int64 `json:"timestamp-ms"`
+		} `json:"snapshots"`
+	}
+	var metadata icebergMetadata
+	if err := json.Unmarshal(metadataData, &metadata); err != nil {
+		return "", fmt.Errorf("parse Iceberg metadata for %s: %w", tableName, err)
+	}
+
+	cutoffMS := at.UTC().UnixMilli()
+	var selectedID, selectedTimestamp, selectedSequence int64
+	for _, snapshot := range metadata.Snapshots {
+		if snapshot.TimestampMS > cutoffMS {
+			continue
+		}
+		if selectedID == 0 || snapshot.TimestampMS > selectedTimestamp ||
+			(snapshot.TimestampMS == selectedTimestamp && snapshot.SequenceNumber > selectedSequence) {
+			selectedID = snapshot.SnapshotID
+			selectedTimestamp = snapshot.TimestampMS
+			selectedSequence = snapshot.SequenceNumber
+		}
+	}
+	if selectedID == 0 {
+		return "", fmt.Errorf("no retained Iceberg snapshot for %s at or before %s", tableName, at.UTC().Format(time.RFC3339Nano))
+	}
+
+	// Read the metadata version where the selected snapshot was current. Scanning
+	// that version selects its current snapshot while avoiding DuckDB's crashing
+	// snapshot_from_* code path.
+	selectedVersion := 0
+	for candidateVersion := version; candidateVersion >= 1; candidateVersion-- {
+		candidate := metadata
+		if candidateVersion != version {
+			candidateData, err := c.s3Client.GetObject(ctx, path.Join(metadataPrefix, fmt.Sprintf("v%d.metadata.json", candidateVersion)))
+			if err != nil {
+				return "", fmt.Errorf("read Iceberg metadata v%d for %s: %w", candidateVersion, tableName, err)
+			}
+			if err := json.Unmarshal(candidateData, &candidate); err != nil {
+				return "", fmt.Errorf("parse Iceberg metadata v%d for %s: %w", candidateVersion, tableName, err)
+			}
+		}
+		if candidate.CurrentSnapshotID == selectedID {
+			selectedVersion = candidateVersion
+			break
+		}
+	}
+	if selectedVersion == 0 {
+		return "", fmt.Errorf("metadata version for Iceberg snapshot %d on %s was not retained", selectedID, tableName)
+	}
+	return fmt.Sprintf(
+		"iceberg_scan('%s', allow_moved_paths = true, version = '%d')",
+		escapeSQLString(info.S3Path), selectedVersion,
+	), nil
+}
+
+func (c *TableCatalog) resolveTable(tableName string) (TableInfo, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	// Try qualified name first
 	if info, ok := c.tables[tableName]; ok {
 		if c.emptyTables[tableName] {
-			return "", fmt.Errorf("table %q has no data (all rows deleted)", tableName)
+			return TableInfo{}, fmt.Errorf("table %q has no data (all rows deleted)", tableName)
 		}
-		return fmt.Sprintf("iceberg_scan('%s', allow_moved_paths = true)", info.S3Path), nil
+		return info, nil
 	}
 
-	// Try unqualified: search all schemas for a matching table name
 	var matches []TableInfo
 	for qualName, info := range c.tables {
 		if info.Table == tableName && !c.emptyTables[qualName] {
@@ -128,12 +223,16 @@ func (c *TableCatalog) Resolve(tableName string) (string, error) {
 
 	switch len(matches) {
 	case 0:
-		return "", fmt.Errorf("table %q not found", tableName)
+		return TableInfo{}, fmt.Errorf("table %q not found", tableName)
 	case 1:
-		return fmt.Sprintf("iceberg_scan('%s', allow_moved_paths = true)", matches[0].S3Path), nil
+		return matches[0], nil
 	default:
-		return "", fmt.Errorf("ambiguous table name %q: found in multiple schemas", tableName)
+		return TableInfo{}, fmt.Errorf("ambiguous table name %q: found in multiple schemas", tableName)
 	}
+}
+
+func escapeSQLString(value string) string {
+	return strings.ReplaceAll(value, "'", "''")
 }
 
 // RegisterViews creates or replaces DuckDB views for all discovered tables.

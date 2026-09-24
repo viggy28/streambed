@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -81,6 +82,24 @@ func main() {
 	queryCmd.Flags().StringVar(&cfg.DuckLakeDataPath, "ducklake-data-path", cfg.DuckLakeDataPath, "DuckLake data path (defaults to s3://bucket/prefix/ducklake/)")
 	queryCmd.Flags().StringVar(&cfg.QueryAddr, "listen-addr", cfg.QueryAddr, "Listen address for query server")
 	queryCmd.Flags().StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level (DEBUG, INFO, WARN, ERROR)")
+
+	var snapshotsTable string
+	snapshotsCmd := &cobra.Command{
+		Use:   "snapshots",
+		Short: "List retained snapshots for a table",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSnapshots(cmd, snapshotsTable)
+		},
+	}
+	snapshotsCmd.Flags().StringVar(&snapshotsTable, "table", "", "Table to inspect as schema.table (required)")
+	snapshotsCmd.Flags().StringVar(&cfg.TargetFormat, "target-format", cfg.TargetFormat, "Lakehouse target format: iceberg or ducklake")
+	snapshotsCmd.Flags().StringVar(&cfg.S3Bucket, "s3-bucket", cfg.S3Bucket, "S3 bucket name")
+	snapshotsCmd.Flags().StringVar(&cfg.S3Prefix, "s3-prefix", cfg.S3Prefix, "S3 key prefix")
+	snapshotsCmd.Flags().StringVar(&cfg.S3Endpoint, "s3-endpoint", cfg.S3Endpoint, "Custom S3 endpoint (MinIO)")
+	snapshotsCmd.Flags().StringVar(&cfg.S3Region, "s3-region", cfg.S3Region, "AWS region")
+	snapshotsCmd.Flags().StringVar(&cfg.DuckLakeCatalog, "ducklake-catalog", cfg.DuckLakeCatalog, "DuckLake catalog path")
+	snapshotsCmd.Flags().StringVar(&cfg.DuckLakeCatalogStore, "ducklake-catalog-store", cfg.DuckLakeCatalogStore, "DuckLake catalog store: sqlite or duckdb")
+	snapshotsCmd.Flags().StringVar(&cfg.DuckLakeDataPath, "ducklake-data-path", cfg.DuckLakeDataPath, "DuckLake data path (defaults to s3://bucket/prefix/ducklake/)")
 
 	var cleanupTables []string
 	var cleanupDryRun bool
@@ -188,7 +207,7 @@ snapshot LSN are silently discarded for this table to avoid duplicates.`,
 	resyncCmd.Flags().IntVar(&cfg.FlushRows, "flush-rows", cfg.FlushRows, "Rows per parquet file / Iceberg snapshot")
 	resyncCmd.Flags().StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level (DEBUG, INFO, WARN, ERROR)")
 
-	rootCmd.AddCommand(syncCmd, queryCmd, cleanupCmd, maintenanceCmd, resyncCmd)
+	rootCmd.AddCommand(syncCmd, queryCmd, snapshotsCmd, cleanupCmd, maintenanceCmd, resyncCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -626,6 +645,99 @@ func runQuery(cmd *cobra.Command, args []string) error {
 
 	logger.Info("streambed query server stopped")
 	return nil
+}
+
+func runSnapshots(cmd *cobra.Command, tableRef string) error {
+	cfg := config.Load()
+	cmd.Flags().Visit(func(f *pflag.Flag) {
+		switch f.Name {
+		case "target-format":
+			cfg.TargetFormat = strings.ToLower(f.Value.String())
+		case "s3-bucket":
+			cfg.S3Bucket = f.Value.String()
+		case "s3-prefix":
+			cfg.S3Prefix = f.Value.String()
+		case "s3-endpoint":
+			cfg.S3Endpoint = f.Value.String()
+		case "s3-region":
+			cfg.S3Region = f.Value.String()
+		case "ducklake-catalog":
+			cfg.DuckLakeCatalog = f.Value.String()
+		case "ducklake-catalog-store":
+			cfg.DuckLakeCatalogStore = strings.ToLower(f.Value.String())
+		case "ducklake-data-path":
+			cfg.DuckLakeDataPath = f.Value.String()
+		}
+	})
+
+	parts := strings.Split(tableRef, ".")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return fmt.Errorf("--table schema.table is required")
+	}
+	if cfg.TargetFormat != "iceberg" && cfg.TargetFormat != "ducklake" {
+		return fmt.Errorf("target-format must be one of: iceberg, ducklake")
+	}
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	out := cmd.OutOrStdout()
+
+	if cfg.TargetFormat == "ducklake" {
+		if cfg.DuckLakeCatalog == "" {
+			return fmt.Errorf("ducklake-catalog is required when target-format=ducklake")
+		}
+		db, err := ducklake.Open(ctx, ducklake.Config{
+			CatalogPath:  cfg.DuckLakeCatalog,
+			CatalogStore: cfg.DuckLakeCatalogStore,
+			DataPath:     cfg.EffectiveDuckLakeDataPath(),
+			S3Endpoint:   cfg.S3Endpoint,
+			S3Region:     cfg.S3Region,
+			ReadOnly:     true,
+		})
+		if err != nil {
+			return fmt.Errorf("open DuckLake catalog: %w", err)
+		}
+		defer db.Close()
+		snapshots, err := ducklake.ListTableSnapshots(ctx, db, "streambed", parts[0], parts[1])
+		if err != nil {
+			return fmt.Errorf("list DuckLake snapshots: %w", err)
+		}
+		writeDuckLakeSnapshots(out, snapshots)
+		return nil
+	}
+
+	if cfg.S3Bucket == "" {
+		return fmt.Errorf("s3-bucket is required when target-format=iceberg")
+	}
+	s3Client, err := storage.NewS3Client(ctx, cfg.S3Bucket, cfg.S3Region, cfg.S3Endpoint)
+	if err != nil {
+		return fmt.Errorf("create S3 client: %w", err)
+	}
+	snapshots, err := iceberg.NewCatalog(s3Client, cfg.S3Bucket, cfg.S3Prefix).ListSnapshots(ctx, parts[0], parts[1])
+	if err != nil {
+		return fmt.Errorf("list Iceberg snapshots: %w", err)
+	}
+	writeIcebergSnapshots(out, snapshots)
+	return nil
+}
+
+func writeDuckLakeSnapshots(out io.Writer, snapshots []ducklake.SnapshotInfo) {
+	fmt.Fprintln(out, "SNAPSHOT_ID\tTIMESTAMP_UTC\tSCHEMA_VERSION\tOPERATION\tLAST_FLUSH_LSN\tCOMMIT_MESSAGE")
+	for _, snap := range snapshots {
+		fmt.Fprintf(out, "%d\t%s\t%d\t%s\t%s\t%s\n",
+			snap.SnapshotID, snap.SnapshotTime.UTC().Format(time.RFC3339Nano), snap.SchemaVersion,
+			snap.Operation, snap.LastFlushLSN, snap.CommitMessage)
+	}
+}
+
+func writeIcebergSnapshots(out io.Writer, snapshots []iceberg.SnapshotInfo) {
+	fmt.Fprintln(out, "SNAPSHOT_ID\tTIMESTAMP_UTC\tSEQUENCE_NUMBER\tOPERATION\tLAST_FLUSH_LSN")
+	for _, snap := range snapshots {
+		fmt.Fprintf(out, "%d\t%s\t%d\t%s\t%s\n",
+			snap.SnapshotID, snap.Timestamp.UTC().Format(time.RFC3339Nano), snap.SequenceNumber,
+			snap.Summary["operation"], snap.Summary["streambed.last_flush_lsn"])
+	}
 }
 
 func getTargetFlushLSN(ctx context.Context, targetFormat string, catalog *iceberg.Catalog, duckWriter *ducklake.Writer, schema, table string) (string, bool, error) {
