@@ -10,11 +10,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> Starting Postgres and MinIO..."
-docker compose -f "$COMPOSE_FILE" up -d --wait
+echo "==> Starting Postgres and Silo..."
+docker compose -f "$COMPOSE_FILE" up -d postgres minio --wait
 
-echo "==> Waiting for services to be healthy..."
-sleep 3
+echo "==> Creating test bucket..."
+docker compose -f "$COMPOSE_FILE" up createbucket
 
 echo "==> Running integration tests..."
 cd "$PROJECT_DIR"

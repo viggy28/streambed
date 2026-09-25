@@ -34,7 +34,7 @@ go test ./internal/... ./config/...
 ./scripts/test-integration.sh
 ```
 
-Integration tests use the `integration` build tag and run against Postgres (port 5434) and MinIO (port 9002) from `test/integration/docker-compose.yml`.
+Integration tests use the `integration` build tag and run against Postgres (port 5434) and the MinIO-compatible Silo server (port 9002) from `test/integration/docker-compose.yml`. See [Integration test object-storage image](docs/integration-test-images.md) for the image choice and update process.
 
 ## Submitting Changes
 
