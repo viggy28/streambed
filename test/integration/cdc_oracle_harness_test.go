@@ -35,6 +35,10 @@ type cdcOracleTarget string
 const (
 	cdcOracleIceberg  cdcOracleTarget = "iceberg"
 	cdcOracleDuckLake cdcOracleTarget = "ducklake"
+	// The direct oracle opens the catalog from a second process while sync is
+	// running. DuckDB catalog files allow only one read/write process, so this
+	// concurrency scenario must explicitly use the SQLite catalog backend.
+	cdcOracleDuckLakeCatalogStore = "sqlite"
 )
 
 type oracleTableRef struct {
@@ -327,7 +331,11 @@ func cdcOracleSyncArgs(target cdcOracleTarget, slot, prefix, statePath, catalogP
 		"--log-level=INFO",
 	}
 	if target == cdcOracleDuckLake {
-		args = append(args, "--ducklake-catalog="+catalogPath, "--ducklake-data-path="+dataPath)
+		args = append(args,
+			"--ducklake-catalog="+catalogPath,
+			"--ducklake-catalog-store="+cdcOracleDuckLakeCatalogStore,
+			"--ducklake-data-path="+dataPath,
+		)
 	}
 	return args
 }
@@ -575,11 +583,12 @@ func openCDCTargetReader(t *testing.T, target cdcOracleTarget, prefix, catalogPa
 		}
 	case cdcOracleDuckLake:
 		db, err := ducklake.Open(context.Background(), ducklake.Config{
-			CatalogPath: catalogPath,
-			DataPath:    dataPath,
-			S3Endpoint:  minioEndpoint,
-			S3Region:    s3Region,
-			ReadOnly:    true,
+			CatalogPath:  catalogPath,
+			CatalogStore: cdcOracleDuckLakeCatalogStore,
+			DataPath:     dataPath,
+			S3Endpoint:   minioEndpoint,
+			S3Region:     s3Region,
+			ReadOnly:     true,
 		})
 		if err != nil {
 			t.Fatalf("open DuckLake oracle reader: %v", err)
