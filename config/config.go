@@ -10,6 +10,11 @@ import (
 
 type Config struct {
 	SourceURL            string
+	// PrimaryURL, if set, is used for write operations (CREATE PUBLICATION,
+	// CREATE_REPLICATION_SLOT, metadata queries). Useful when --source-url
+	// points at a read-only hot-standby replica. Falls back to SourceURL
+	// when empty.
+	PrimaryURL           string
 	S3Bucket             string
 	S3Prefix             string
 	S3Endpoint           string
@@ -28,6 +33,13 @@ type Config struct {
 	LogLevel             string
 	MutationMode         string // Iceberg row mutation strategy: "cow" or "mor"
 	QueryAddr            string // listen address for query server (e.g., ":5433")
+}
+
+func (c *Config) EffectivePrimaryURL() string {
+	if c.PrimaryURL != "" {
+		return c.PrimaryURL
+	}
+	return c.SourceURL
 }
 
 func Default() *Config {
@@ -70,6 +82,9 @@ func Load() *Config {
 
 	if v := os.Getenv("STREAMBED_SOURCE_URL"); v != "" {
 		cfg.SourceURL = v
+	}
+	if v := os.Getenv("STREAMBED_PRIMARY_URL"); v != "" {
+		cfg.PrimaryURL = v
 	}
 	if v := os.Getenv("STREAMBED_S3_BUCKET"); v != "" {
 		cfg.S3Bucket = v

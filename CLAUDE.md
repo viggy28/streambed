@@ -10,10 +10,20 @@ Postgres-to-Iceberg CDC engine. Streams WAL changes via logical replication, wri
 # Build
 go build -o streambed ./cmd/streambed
 
-# Run locally (requires docker compose stack)
+# Run locally against primary (requires docker compose stack)
 docker compose up
 ./streambed sync \
   --source-url="postgres://postgres:test@localhost:5432/postgres" \
+  --s3-bucket="streambed" \
+  --s3-endpoint="http://localhost:9000" \
+  --s3-prefix="test" \
+  --query-addr=:5433
+
+# Run against a hot-standby replica (Postgres 16+)
+# --primary-url is used only for CREATE PUBLICATION / CREATE_REPLICATION_SLOT
+./streambed sync \
+  --source-url="postgres://postgres:test@replica-host:5432/postgres" \
+  --primary-url="postgres://postgres:test@primary-host:5432/postgres" \
   --s3-bucket="streambed" \
   --s3-endpoint="http://localhost:9000" \
   --s3-prefix="test" \
@@ -36,6 +46,15 @@ docker compose -f test/integration/docker-compose.yml down -v
 ```
 
 Integration tests use build tag `integration`. They require Postgres (port 5434) and MinIO (port 9002) from `test/integration/docker-compose.yml`.
+
+```bash
+# Replica integration tests (requires the replica compose stack)
+docker compose -f test/integration/docker-compose-replica.yml up -d --wait
+go test -tags integration -v -run TestReplica -timeout 120s ./test/integration/...
+docker compose -f test/integration/docker-compose-replica.yml down -v
+```
+
+Replica tests require primary on port 5434 and hot-standby on port 5435. They skip automatically when the replica is not running.
 
 ## Project Structure
 

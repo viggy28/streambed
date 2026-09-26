@@ -47,6 +47,7 @@ func main() {
 
 	cfg := config.Load()
 	syncCmd.Flags().StringVar(&cfg.SourceURL, "source-url", cfg.SourceURL, "Postgres connection URL")
+	syncCmd.Flags().StringVar(&cfg.PrimaryURL, "primary-url", cfg.PrimaryURL, "Postgres primary URL for write setup ops (publication, slot). Defaults to --source-url. Set when --source-url is a replica.")
 	syncCmd.Flags().StringVar(&cfg.S3Bucket, "s3-bucket", cfg.S3Bucket, "S3 bucket name")
 	syncCmd.Flags().StringVar(&cfg.S3Prefix, "s3-prefix", cfg.S3Prefix, "S3 key prefix")
 	syncCmd.Flags().StringVar(&cfg.S3Endpoint, "s3-endpoint", cfg.S3Endpoint, "Custom S3 endpoint (MinIO)")
@@ -222,6 +223,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 		switch f.Name {
 		case "source-url":
 			cfg.SourceURL = f.Value.String()
+		case "primary-url":
+			cfg.PrimaryURL = f.Value.String()
 		case "s3-bucket":
 			cfg.S3Bucket = f.Value.String()
 		case "s3-prefix":
@@ -267,7 +270,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 	logger := setupLogger(cfg.LogLevel)
 
-	logger.Info("streambed starting",
+	logArgs := []any{
+		"primary", maskURL(cfg.PrimaryURL),
 		"source", maskURL(cfg.SourceURL),
 		"bucket", cfg.S3Bucket,
 		"prefix", cfg.S3Prefix,
@@ -277,7 +281,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 		"flush_interval", cfg.FlushInterval,
 		"target_file_size_mb", cfg.TargetFileSizeMB,
 		"mutation_mode", cfg.MutationMode,
-	)
+	}
+	logger.Info("streambed starting", logArgs...)
 
 	go func() {
 		http.ListenAndServe("localhost:6060", nil)
@@ -369,7 +374,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}()
 	}
 
-	// Connect to Postgres for replication
+	// Connect to Postgres for WAL streaming (may be a replica).
 	connStr := cfg.SourceURL
 	if !strings.Contains(connStr, "replication=") {
 		if strings.Contains(connStr, "?") {
@@ -385,22 +390,40 @@ func runSync(cmd *cobra.Command, args []string) error {
 	}
 	defer pgConn.Close(context.Background())
 
-	// Open a regular (non-replication) connection for metadata queries
-	// (column defaults on schema changes, etc.).
-	metaConn, err := pgx.Connect(ctx, cfg.SourceURL)
+	// Open a replication connection to the PRIMARY for setup operations
+	// (CREATE PUBLICATION, CREATE_REPLICATION_SLOT). When --primary-url is
+	// not set this is the same server as pgConn.
+	primaryURL := cfg.EffectivePrimaryURL()
+	primaryReplStr := primaryURL
+	if !strings.Contains(primaryReplStr, "replication=") {
+		if strings.Contains(primaryReplStr, "?") {
+			primaryReplStr += "&replication=database"
+		} else {
+			primaryReplStr += "?replication=database"
+		}
+	}
+	setupConn, err := pgconn.Connect(ctx, primaryReplStr)
+	if err != nil {
+		return fmt.Errorf("connect to postgres (primary setup): %w", err)
+	}
+	defer setupConn.Close(context.Background())
+
+	// Open a regular (non-replication) connection to the PRIMARY for metadata
+	// queries (column defaults on schema changes, etc.). Must be writable.
+	metaConn, err := pgx.Connect(ctx, primaryURL)
 	if err != nil {
 		return fmt.Errorf("connect to postgres (metadata): %w", err)
 	}
 	defer metaConn.Close(context.Background())
 	metaQuerier := wal.NewMetadataQuerier(metaConn)
 
-	// Create publication
+	// Create publication on the primary.
 	pubName := cfg.SlotName // use same name for publication
-	if err := wal.CreatePublication(ctx, pgConn, pubName, cfg.IncludeTables, logger); err != nil {
+	if err := wal.CreatePublication(ctx, setupConn, pubName, cfg.IncludeTables, logger); err != nil {
 		return fmt.Errorf("create publication: %w", err)
 	}
 
-	// Create or reuse replication slot
+	// Create or reuse replication slot on the source (could be replica).
 	slotLSN, err := wal.CreateOrReuseSlot(ctx, pgConn, cfg.SlotName, logger)
 	if err != nil {
 		return fmt.Errorf("setup replication slot: %w", err)
@@ -484,8 +507,9 @@ func runSync(cmd *cobra.Command, args []string) error {
 			"backoff", reconnectBackoff,
 		)
 
-		// Close old connection (best-effort).
+		// Close old connections (best-effort).
 		pgConn.Close(context.Background())
+		setupConn.Close(context.Background())
 
 		// Wait before reconnecting.
 		select {
@@ -496,10 +520,17 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}
 		reconnectBackoff = min(reconnectBackoff*2, maxReconnectBackoff)
 
-		// Reconnect to Postgres.
+		// Reconnect WAL streaming connection (replica or primary).
 		pgConn, err = pgconn.Connect(ctx, connStr)
 		if err != nil {
-			logger.Error("reconnect failed", "error", err)
+			logger.Error("reconnect (streaming) failed", "error", err)
+			continue
+		}
+
+		// Reconnect setup connection to the primary.
+		setupConn, err = pgconn.Connect(ctx, primaryReplStr)
+		if err != nil {
+			logger.Error("reconnect (primary setup) failed", "error", err)
 			continue
 		}
 
@@ -522,8 +553,9 @@ func runSync(cmd *cobra.Command, args []string) error {
 			tableFlushLSN[fmt.Sprintf("%s.%s", t.Schema, t.Table)] = lsn
 		}
 
-		// Recompute startLSN.
-		slotLSN, err = wal.CreateOrReuseSlot(ctx, pgConn, cfg.SlotName, logger)
+		// Recompute startLSN from the primary's slot state to ensure the slot exists
+		// (if it was dropped, we must recreate it on the primary).
+		slotLSN, err = wal.CreateOrReuseSlot(ctx, setupConn, cfg.SlotName, logger)
 		if err != nil {
 			logger.Error("reconnect: slot setup failed", "error", err)
 			continue

@@ -43,6 +43,8 @@ Run `streambed sync --help` for all configuration options. All flags support env
 
 Use `--target-file-size-mb` (or `STREAMBED_TARGET_FILE_SIZE_MB`) to split large flushes into approximately target-sized Parquet data files. The default is 128 MiB. This is a target, not a hard maximum; small flushes still create small files.
 
+To reduce load on your primary, point `--source-url` at a **hot-standby replica** and add `--primary-url` for the primary (used only for publication and slot setup). Requires Postgres 16+. See [docs/replica.md](docs/replica.md) for details.
+
 ### DuckLake catalog defaults
 
 With `--target-format=ducklake`, Streambed stores catalog metadata in a local
