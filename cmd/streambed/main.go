@@ -423,8 +423,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("create publication: %w", err)
 	}
 
-	// Create or reuse replication slot on the primary (so it syncs to the replica).
-	slotLSN, err := wal.CreateOrReuseSlot(ctx, setupConn, cfg.SlotName, logger)
+	// Create or reuse replication slot on the source (could be replica).
+	slotLSN, err := wal.CreateOrReuseSlot(ctx, pgConn, cfg.SlotName, logger)
 	if err != nil {
 		return fmt.Errorf("setup replication slot: %w", err)
 	}

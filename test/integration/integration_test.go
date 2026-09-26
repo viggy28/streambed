@@ -46,6 +46,12 @@ const (
 
 	slotName  = "streambed_integration_test"
 	flushRows = 500
+
+	replicaHost = "localhost"
+	replicaPort = "5435"
+	replicaUser = "postgres"
+	replicaPass = "test"
+	replicaDB   = "postgres"
 )
 
 func pgConnStr() string {
@@ -54,6 +60,15 @@ func pgConnStr() string {
 
 func pgReplConnStr() string {
 	return pgConnStr() + "?replication=database"
+}
+
+func replicaConnStr() string {
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s",
+		replicaUser, replicaPass, replicaHost, replicaPort, replicaDB)
+}
+
+func replicaReplConnStr() string {
+	return replicaConnStr() + "?replication=database"
 }
 
 // newTestS3Client returns an S3 client configured for the MinIO test instance.
@@ -134,15 +149,23 @@ func cleanup(t *testing.T) {
 	}
 	defer conn.Close(ctx)
 
-	// Drop slot
+	// Drop slot on primary
 	result := conn.Exec(ctx, fmt.Sprintf("SELECT pg_drop_replication_slot('%s') FROM pg_replication_slots WHERE slot_name = '%s'", slotName, slotName))
 	result.ReadAll()
 	result.Close()
 
-	// Drop publication
+	// Drop publication on primary
 	result = conn.Exec(ctx, fmt.Sprintf("DROP PUBLICATION IF EXISTS %s", slotName))
 	result.ReadAll()
 	result.Close()
+
+	// Attempt to drop slot on replica (ignoring connection errors if replica is not running)
+	if replConn, err := pgconn.Connect(ctx, replicaReplConnStr()); err == nil {
+		result = replConn.Exec(ctx, fmt.Sprintf("SELECT pg_drop_replication_slot('%s') FROM pg_replication_slots WHERE slot_name = '%s'", slotName, slotName))
+		result.ReadAll()
+		result.Close()
+		replConn.Close(ctx)
+	}
 }
 
 func setupTestTable(t *testing.T) {
@@ -261,7 +284,105 @@ func runSyncWithMutationMode(t *testing.T, ctx context.Context, duration time.Du
 	}
 }
 
-// countParquetFilesOnS3 lists objects under the test prefix and counts .parquet files.
+// createReplicaSlotAndPublication creates the publication on the primary and
+// the replication slot on the replica, handling the required WAL generation
+// to unblock slot creation on the replica.
+func createReplicaSlotAndPublication(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// 1. Create publication on the primary
+	setupConn, err := pgconn.Connect(ctx, pgReplConnStr())
+	if err != nil {
+		t.Fatalf("connect to primary: %v", err)
+	}
+	defer setupConn.Close(ctx)
+
+	if err := wal.CreatePublication(ctx, setupConn, slotName, nil, logger); err != nil {
+		t.Fatalf("create publication: %v", err)
+	}
+
+	// 2. Create the replication slot on the replica
+	// Postgres 16 replica slot creation waits for an xl_running_xacts record.
+	// We do this concurrently while unblocking it from the primary.
+	replConn, err := pgconn.Connect(ctx, replicaReplConnStr())
+	if err != nil {
+		t.Fatalf("connect to replica: %v", err)
+	}
+	defer replConn.Close(ctx)
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := wal.CreateOrReuseSlot(ctx, replConn, slotName, logger)
+		errCh <- err
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+	setupConn.Exec(ctx, "SELECT pg_log_standby_snapshot()").Close()
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("create slot on replica: %v", err)
+	}
+}
+
+// runReplicaSync runs the streambed sync pipeline streaming from the replica.
+func runReplicaSync(t *testing.T, ctx context.Context, duration time.Duration) {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	statePath := t.TempDir() + "/state.db"
+	stateStore, err := state.Open(statePath)
+	if err != nil {
+		t.Fatalf("open state store: %v", err)
+	}
+	defer stateStore.Close()
+
+	s3Client, err := storage.NewS3Client(ctx, s3Bucket, s3Region, minioEndpoint)
+	if err != nil {
+		t.Fatalf("create S3 client: %v", err)
+	}
+
+	// Postgres replication connection to REPLICA
+	pgConn, err := pgconn.Connect(ctx, replicaReplConnStr())
+	if err != nil {
+		t.Fatalf("connect to replica for replication: %v", err)
+	}
+	defer pgConn.Close(context.Background())
+
+	// Reuse existing replication slot (instantaneous, no blocking)
+	slotLSN, err := wal.CreateOrReuseSlot(ctx, pgConn, slotName, logger)
+	if err != nil {
+		t.Fatalf("setup replication slot: %v", err)
+	}
+
+	catalog := iceberg.NewCatalog(s3Client, s3Bucket, s3Prefix)
+	writer := iceberg.NewWriter(catalog, s3Client, stateStore, slotName,
+		flushRows, 5*time.Second, logger)
+
+	// Open metadata connection to PRIMARY
+	metaConn, err := pgx.Connect(ctx, pgConnStr())
+	if err != nil {
+		t.Fatalf("connect metadata: %v", err)
+	}
+	defer metaConn.Close(context.Background())
+	metaQuerier := wal.NewMetadataQuerier(metaConn)
+
+	tableFlushLSN := make(map[string]pglogrepl.LSN)
+	p := pipeline.New(pgConn, slotName, slotName, slotLSN, nil,
+		logger, stateStore, tableFlushLSN, writer, 5*time.Second, metaQuerier)
+
+	syncCtx, cancel := context.WithTimeout(ctx, duration)
+	defer cancel()
+
+	pipelineErr := p.Run(syncCtx)
+	if pipelineErr != nil && syncCtx.Err() != nil {
+		t.Logf("pipeline stopped: %v", pipelineErr)
+	} else if pipelineErr != nil {
+		t.Fatalf("unexpected pipeline error: %v", pipelineErr)
+	}
+}
+
 func countParquetFilesOnS3(t *testing.T) int {
 	t.Helper()
 	ctx := context.Background()

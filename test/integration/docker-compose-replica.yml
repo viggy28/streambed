@@ -55,6 +55,7 @@ services:
         # Override recovery settings.
         cat >> /var/lib/postgresql/data/postgresql.conf <<PGCONF
         hot_standby = on
+        hot_standby_feedback = on
         primary_conninfo = 'host=postgres port=5432 user=postgres password=test application_name=replica'
         PGCONF
         # Start Postgres as a hot standby.
