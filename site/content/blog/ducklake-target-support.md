@@ -2,7 +2,8 @@
 title: "The small-file problem gets worse with CDC"
 date: 2026-08-30
 authors:
-  - name: Vignesh (Viggy) Ravichandran
+  - name: viggy28
+    link: https://x.com/viggy28
 ---
 
 _Why Streambed is adopting DuckLake for Postgres-to-DuckDB analytics._

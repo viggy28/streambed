@@ -2,7 +2,8 @@
 title: "Why I Built Streambed"
 date: 2026-04-12
 authors:
-  - name: Viggy
+  - name: viggy28
+    link: https://x.com/viggy28
 ---
 
 Every Postgres database eventually hits the same wall: analytical queries that are too slow for production but too important to ignore.

@@ -2,7 +2,8 @@
 title: "Compaction in Streambed"
 date: 2026-08-09
 authors:
-  - name: Vignesh (Viggy) Ravichandran
+  - name: viggy28
+    link: https://x.com/viggy28
 ---
 
 Streambed is getting more mature. Big data has a small problem or more precisely small file problem.

@@ -2,7 +2,8 @@
 title: "Why time travel and branching are first-class lakehouse operations"
 date: 2026-09-25
 authors:
-  - name: Vignesh (Viggy) Ravichandran
+  - name: viggy28
+    link: https://x.com/viggy28
 ---
 
 Time travel sounds like an advanced database feature. In an immutable-file system, it is closer to following an old pointer.
