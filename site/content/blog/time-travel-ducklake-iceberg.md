@@ -2,7 +2,8 @@
 title: "Time travel for Postgres: What did this table look like at noon?"
 date: 2026-09-24
 authors:
-  - name: Vignesh (Viggy) Ravichandran
+  - name: viggy28
+    link: https://x.com/viggy28
 ---
 
 Streambed now supports time travel queries over your replicated Postgres data.

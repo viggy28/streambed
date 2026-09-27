@@ -2,7 +2,8 @@
 title: "Logical Replication Is Postgres's Most Important Feature"
 date: 2026-09-26
 authors:
-  - name: Vignesh (Viggy) Ravichandran
+  - name: viggy28
+    link: https://x.com/viggy28
 ---
 
 Logical replication might be one of the most important features in Postgres.

@@ -2,7 +2,8 @@
 title: "Parquet is to file formats what Postgres is to databases"
 date: 2026-09-25
 authors:
-  - name: Vignesh (Viggy) Ravichandran
+  - name: viggy28
+    link: https://x.com/viggy28
 ---
 
 The more I work with modern data infrastructure, the more I believe this:
