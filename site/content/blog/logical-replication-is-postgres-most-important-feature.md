@@ -1,6 +1,8 @@
 ---
 title: "Logical Replication Is Postgres's Most Important Feature"
 date: 2026-09-26
+aliases:
+  - /blog/postgres-logical-replication-escape-hatch/
 authors:
   - name: Vignesh (viggy28)
     link: https://x.com/viggy28
