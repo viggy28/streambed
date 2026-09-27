@@ -2,7 +2,7 @@
 title: "Parquet is to file formats what Postgres is to databases"
 date: 2026-09-25
 authors:
-  - name: viggy28
+  - name: Vignesh (viggy28)
     link: https://x.com/viggy28
 ---
 
