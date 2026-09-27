@@ -2,7 +2,7 @@
 title: "Why time travel and branching are first-class lakehouse operations"
 date: 2026-09-25
 authors:
-  - name: viggy28
+  - name: Vignesh (viggy28)
     link: https://x.com/viggy28
 ---
 

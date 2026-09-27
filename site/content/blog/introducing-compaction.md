@@ -2,7 +2,7 @@
 title: "Compaction in Streambed"
 date: 2026-08-09
 authors:
-  - name: viggy28
+  - name: Vignesh (viggy28)
     link: https://x.com/viggy28
 ---
 

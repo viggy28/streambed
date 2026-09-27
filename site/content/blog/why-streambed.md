@@ -2,7 +2,7 @@
 title: "Why I Built Streambed"
 date: 2026-04-12
 authors:
-  - name: viggy28
+  - name: Vignesh (viggy28)
     link: https://x.com/viggy28
 ---
 
