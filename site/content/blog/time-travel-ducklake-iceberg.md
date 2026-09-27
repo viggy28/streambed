@@ -2,7 +2,7 @@
 title: "Time travel for Postgres: What did this table look like at noon?"
 date: 2026-09-24
 authors:
-  - name: viggy28
+  - name: Vignesh (viggy28)
     link: https://x.com/viggy28
 ---
 

@@ -2,7 +2,7 @@
 title: "Logical Replication Is Postgres's Most Important Feature"
 date: 2026-09-26
 authors:
-  - name: viggy28
+  - name: Vignesh (viggy28)
     link: https://x.com/viggy28
 ---
 
@@ -46,7 +46,7 @@ For an early-stage infrastructure company, this is not a minor implementation de
 
 Every durable Postgres change is recorded in WAL. Physical replication interprets that log in terms of Postgres storage. Logical decoding interprets it as changes to data: a row was inserted, updated, or deleted. Native logical replication uses this mechanism between Postgres databases; tools such as Debezium and PeerDB consume the underlying logical change stream.
 
-A replication slot remembers how far a consumer has read. An output plugin such as Postgres's built-in `pgoutput` turns WAL records into a stream the consumer can understand. The consumer can then apply those changes to another Postgres database—or translate them into a completely different system.
+A replication slot remembers how far a consumer has read. An output plugin such as Postgres's built-in `pgoutput` turns WAL records into a stream the consumer can understand. The consumer can then apply those changes to another Postgres database or translate them into a completely different system.
 
 ```text
                          ┌──▶ another Postgres
@@ -71,7 +71,7 @@ That boundary creates room for products that are not trying to become the next p
 
 The startup gets a narrow entry point into an existing architecture. The customer gets to evaluate the product without making an irreversible decision.
 
-## Debezium, PeerDB, and the products built at this seam
+## Debezium, PeerDB, and the products built on this boundary
 
 [Debezium](https://debezium.io/documentation/reference/stable/connectors/postgresql.html) turns Postgres changes into an event stream. It takes an initial consistent snapshot, continues from the corresponding WAL position, and publishes row-level changes into Kafka-compatible infrastructure. The applications consuming those events do not need to understand Postgres WAL.
 
@@ -79,7 +79,7 @@ The startup gets a narrow entry point into an existing architecture. The custome
 
 [StreamBed](https://github.com/viggy28/streambed) uses logical replication to write Postgres changes as Parquet with Iceberg or DuckLake metadata. It is one more example of the pattern: Postgres remains the transactional system, while the same data becomes available in an open analytical representation on object storage.
 
-These projects produce very different things—events, warehouse tables, and lakehouse files—but they share the same adoption model:
+These projects produce very different things: events, warehouse tables, and lakehouse files. But they share the same adoption model:
 
 1. meet the customer where their data already lives;
 2. begin as a downstream system rather than a replacement;
@@ -126,4 +126,4 @@ It also gives new infrastructure startups a realistic way to enter the Postgres 
 
 Perhaps one of the most important properties of an open database is not simply that you can run it anywhere.
 
-It is that you—and the products built around your data—have a way out.
+It is that you, and the products built around your data, have a way out.

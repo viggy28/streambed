@@ -2,7 +2,7 @@
 title: "The small-file problem gets worse with CDC"
 date: 2026-08-30
 authors:
-  - name: viggy28
+  - name: Vignesh (viggy28)
     link: https://x.com/viggy28
 ---
 
