@@ -16,6 +16,8 @@ Because it gives you a way out.
 
 <!--more-->
 
+![Logical replication as Postgres's escape hatch](/images/logical-replication-escape-hatch.png)
+
 I came to this view after building and leading the Postgres platform at Cloudflare from 2019 to 2023, and co-founding [Omnigres](https://github.com/omnigres/omnigres), which explored Postgres extensions as an application runtime. I spent a lot of time thinking about a related problem: how can you build a sustainable company in the Postgres ecosystem without first persuading customers to replace the database at the center of their architecture?
 
 Your Postgres database may start as a single AWS, Azure, or Google Cloud resource. Over time, the provider's identity system, private network, and operational tooling grow around it.
