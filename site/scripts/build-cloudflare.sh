@@ -7,4 +7,7 @@ if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
 fi
 
 go mod download
+
+# Avoid publishing files removed from static/ when a build directory is reused.
+rm -rf public
 hugo --minify
