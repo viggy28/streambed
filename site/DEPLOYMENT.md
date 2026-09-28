@@ -1,6 +1,8 @@
 # Site deployment
 
-`streambed.dev` is built from this directory with Hugo Extended and published as a static site.
+`streambed.dev` is built from this directory with Hugo Extended and published as a static site. Cloudflare Pages is the authoritative production host and CDN.
+
+Commits to `main` deploy automatically to `https://streambed.dev`. Pull requests and non-production branches receive isolated preview deployments.
 
 ## Cloudflare Pages configuration
 
@@ -10,6 +12,7 @@
 | Root directory | `site` |
 | Build command | `./scripts/build-cloudflare.sh` |
 | Build output directory | `public` |
+| Production domains | `streambed.dev`, `www.streambed.dev` |
 
 Production environment variables:
 
@@ -28,6 +31,8 @@ HUGO_ENVIRONMENT=preview
 ```
 
 Do not override Hugo's configured `baseURL` with the Pages deployment URL. Canonical URLs must remain under `https://streambed.dev/`.
+
+Cloudflare redirects `www.streambed.dev` to the apex while preserving paths and query strings. The production `streambed-site.pages.dev` hostname also redirects to the apex; branch and commit preview hostnames remain directly accessible.
 
 The build script converts a shallow checkout to a full checkout before invoking Hugo. This is required because `hugo.yaml` enables Git metadata for page modification dates.
 
