@@ -1,0 +1,104 @@
+# docker-compose-replica.yml
+#
+# Extends the base integration docker-compose with a Postgres hot-standby
+# replica. Use this file when running replica-connect tests:
+#
+#   docker compose -f test/integration/docker-compose-replica.yml up -d --wait
+#   go test -tags integration -v -run TestReplica -timeout 120s ./test/integration/...
+#   docker compose -f test/integration/docker-compose-replica.yml down -v
+
+services:
+  # ── Primary (same as docker-compose.yml but also enables the archive/slot) ──
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: test
+    # Mount the init script that appends replication trust rules to pg_hba.conf.
+    volumes:
+      - ./pg-initdb:/docker-entrypoint-initdb.d:ro
+    command: >
+      postgres
+        -c wal_level=logical
+        -c max_replication_slots=8
+        -c max_wal_senders=8
+        -c hot_standby=on
+        -c archive_mode=off
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+
+  # ── Streaming replica (hot standby) ──────────────────────────────────────
+  postgres-replica:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: test
+      # pg_basebackup credentials
+      PGPASSWORD: test
+    # Take a base backup from the primary, then start in hot-standby mode.
+    # The entrypoint waits for the primary to be ready before running basebackup.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -e
+        until pg_isready -h postgres -U postgres; do sleep 1; done
+        echo "Primary is ready – taking base backup..."
+        rm -rf /var/lib/postgresql/data/*
+        pg_basebackup -h postgres -U postgres -D /var/lib/postgresql/data \
+          -Xs -P
+        # Create standby.signal so Postgres starts as a standby.
+        touch /var/lib/postgresql/data/standby.signal
+        # Override recovery settings.
+        cat >> /var/lib/postgresql/data/postgresql.conf <<PGCONF
+        hot_standby = on
+        hot_standby_feedback = on
+        primary_conninfo = 'host=postgres port=5432 user=postgres password=test application_name=replica'
+        PGCONF
+        # Start Postgres as a hot standby.
+        exec docker-entrypoint.sh postgres \
+          -c hot_standby=on \
+          -c wal_level=logical \
+          -c max_replication_slots=8 \
+          -c max_wal_senders=8
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  # ── MinIO (S3-compatible object store) ────────────────────────────────────
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9002:9000"
+      - "9003:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+
+  createbucket:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb local/streambed --ignore-existing;
+      exit 0;
+      "
