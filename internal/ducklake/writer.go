@@ -21,25 +21,28 @@ import (
 const defaultCatalogName = "streambed"
 
 type Config struct {
-	CatalogPath  string
-	CatalogStore string // DuckLake catalog store: "sqlite" (default) or "duckdb"
-	DataPath     string
-	S3Endpoint   string
-	S3Region     string
-	CatalogName  string
-	ReadOnly     bool
+	CatalogPath    string
+	CatalogStore   string // DuckLake catalog store: "sqlite" (default) or "duckdb"
+	DataPath       string
+	S3Endpoint     string
+	S3Region       string
+	CatalogName    string
+	ReadOnly       bool
+	ExtensionPath  string
+	LogicalIndexes []string
 }
 
 type Writer struct {
-	db            *sql.DB
-	state         *state.Store
-	flushRows     int
-	flushInterval time.Duration
-	logger        *slog.Logger
-	cfg           Config
-	catalogName   string
-	buffers       map[string]*tableBuffer
-	ensuredTables map[string]string
+	db             *sql.DB
+	state          *state.Store
+	flushRows      int
+	flushInterval  time.Duration
+	logger         *slog.Logger
+	cfg            Config
+	catalogName    string
+	buffers        map[string]*tableBuffer
+	ensuredTables  map[string]string
+	ensuredIndexes map[string]bool
 }
 
 type tableBuffer struct {
@@ -59,6 +62,9 @@ type cell struct {
 }
 
 func NewWriter(ctx context.Context, cfg Config, store *state.Store, flushRows int, flushInterval time.Duration, logger *slog.Logger) (*Writer, error) {
+	if err := rejectUnmaintainableLogicalIndexes(ctx, cfg); err != nil {
+		return nil, err
+	}
 	if cfg.CatalogName == "" {
 		cfg.CatalogName = defaultCatalogName
 	}
@@ -70,23 +76,74 @@ func NewWriter(ctx context.Context, cfg Config, store *state.Store, flushRows in
 		return nil, err
 	}
 	w := &Writer{
-		db:            db,
-		state:         store,
-		flushRows:     flushRows,
-		flushInterval: flushInterval,
-		logger:        logger,
-		cfg:           cfg,
-		catalogName:   cfg.CatalogName,
-		buffers:       make(map[string]*tableBuffer),
-		ensuredTables: make(map[string]string),
+		db:             db,
+		state:          store,
+		flushRows:      flushRows,
+		flushInterval:  flushInterval,
+		logger:         logger,
+		cfg:            cfg,
+		catalogName:    cfg.CatalogName,
+		buffers:        make(map[string]*tableBuffer),
+		ensuredTables:  make(map[string]string),
+		ensuredIndexes: make(map[string]bool),
+	}
+	if err := w.ensureExistingLogicalIndexes(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 	return w, nil
 }
 
-func Open(ctx context.Context, cfg Config) (*sql.DB, error) {
-	db, err := sql.Open("duckdb", "")
+func rejectUnmaintainableLogicalIndexes(ctx context.Context, cfg Config) error {
+	if cfg.ExtensionPath != "" || normalizedCatalogStore(cfg.CatalogStore) != "duckdb" {
+		return nil
+	}
+	if _, err := os.Stat(cfg.CatalogPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect ducklake catalog: %w", err)
+	}
+	metadata, err := sql.Open("duckdb", cfg.CatalogPath)
 	if err != nil {
-		return nil, fmt.Errorf("open duckdb: %w", err)
+		return fmt.Errorf("inspect ducklake logical indexes: %w", err)
+	}
+	defer metadata.Close()
+	var tableExists bool
+	err = metadata.QueryRowContext(ctx, `SELECT EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'main' AND table_name = 'streambed_equality_index_definition'
+)`).Scan(&tableExists)
+	if err != nil {
+		return fmt.Errorf("inspect ducklake logical indexes: %w", err)
+	}
+	if !tableExists {
+		return nil
+	}
+	var definitions int
+	if err := metadata.QueryRowContext(ctx, `SELECT count(*) FROM streambed_equality_index_definition`).Scan(&definitions); err != nil {
+		return fmt.Errorf("inspect ducklake logical indexes: %w", err)
+	}
+	if definitions > 0 {
+		return fmt.Errorf("catalog contains Streambed logical indexes; the Streambed DuckLake extension must be loaded for all writes")
+	}
+	return nil
+}
+
+func Open(ctx context.Context, cfg Config) (*sql.DB, error) {
+	var db *sql.DB
+	if cfg.ExtensionPath != "" {
+		connector, err := duckdb.NewConnector("?allow_unsigned_extensions=true", nil)
+		if err != nil {
+			return nil, fmt.Errorf("open duckdb connector: %w", err)
+		}
+		db = sql.OpenDB(connector)
+	} else {
+		var err error
+		db, err = sql.Open("duckdb", "")
+		if err != nil {
+			return nil, fmt.Errorf("open duckdb: %w", err)
+		}
 	}
 	db.SetMaxOpenConns(1)
 	if err := Configure(ctx, db, cfg); err != nil {
@@ -98,9 +155,11 @@ func Open(ctx context.Context, cfg Config) (*sql.DB, error) {
 
 func Configure(ctx context.Context, db *sql.DB, cfg Config) error {
 	catalogStore := normalizedCatalogStore(cfg.CatalogStore)
-	stmts := []string{
-		"INSTALL ducklake",
-		"LOAD ducklake",
+	var stmts []string
+	if cfg.ExtensionPath != "" {
+		stmts = append(stmts, fmt.Sprintf("LOAD '%s'", strings.ReplaceAll(cfg.ExtensionPath, "'", "''")))
+	} else {
+		stmts = append(stmts, "INSTALL ducklake", "LOAD ducklake")
 	}
 	if catalogStore == "sqlite" {
 		stmts = append(stmts,
@@ -188,11 +247,145 @@ func (w *Writer) Close() error {
 	return w.db.Close()
 }
 
-func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
-	if _, err := w.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", qname(w.catalogName, schema, table))); err != nil {
+// RecreateTableForResync preserves READY logical-index declarations while replacing
+// the target table. Resync is a truncate-and-reload operation from the user's
+// perspective, so the internal DROP must not silently remove persistent indexes.
+func (w *Writer) RecreateTableForResync(ctx context.Context, schema, table string, columns []wal.Column) error {
+	if err := w.captureReadyLogicalIndexes(ctx, schema, table); err != nil {
 		return err
 	}
-	delete(w.ensuredTables, schema+"."+table)
+
+	// Keep the old table and its durable declarations intact if any part of the
+	// replacement fails. Otherwise a retry without --logical-index would have
+	// nothing persistent left to recover.
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if w.cfg.ExtensionPath != "" {
+		stmt := fmt.Sprintf("CALL ducklake_drop_logical_indexes('%s', '%s', '%s')",
+			strings.ReplaceAll(w.catalogName, "'", "''"), strings.ReplaceAll(schema, "'", "''"), strings.ReplaceAll(table, "'", "''"))
+		if _, err := tx.ExecContext(ctx, stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+			return fmt.Errorf("drop logical indexes for resync: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", qname(w.catalogName, schema, table))); err != nil {
+		return err
+	}
+	if err := w.ensureTable(ctx, tx, schema, table, columns); err != nil {
+		return err
+	}
+	if err := w.reconcileTableSchema(ctx, tx, schema, table, columns); err != nil {
+		return err
+	}
+
+	// Recreate existing READY indexes for the new table. Only call ducklake_create_logical_index;
+	// other setup happens after resync starts processing data.
+	if w.cfg.ExtensionPath != "" {
+		stmt := fmt.Sprintf("SELECT column_name FROM ducklake_list_logical_indexes('%s', '%s', '%s')",
+			strings.ReplaceAll(w.catalogName, "'", "''"), strings.ReplaceAll(schema, "'", "''"), strings.ReplaceAll(table, "'", "''"))
+		rows, err := tx.QueryContext(ctx, stmt)
+		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+			return fmt.Errorf("list logical indexes for resync: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var column string
+			if err := rows.Scan(&column); err != nil {
+				return err
+			}
+			schemaStr := strings.ReplaceAll(schema, "'", "''")
+			tableStr := strings.ReplaceAll(table, "'", "''")
+			columnStr := strings.ReplaceAll(column, "'", "''")
+			createStmt := fmt.Sprintf("CALL ducklake_create_logical_index('%s', '%s', '%s', '%s')",
+				strings.ReplaceAll(w.catalogName, "'", "''"), schemaStr, tableStr, columnStr)
+			if _, err := tx.ExecContext(ctx, createStmt); err != nil {
+				return fmt.Errorf("create logical index %s for resync: %w", column, err)
+			}
+		}
+	}
+
+	key := schema + "." + table
+	delete(w.ensuredTables, key)
+	for indexKey := range w.ensuredIndexes {
+		if strings.HasPrefix(indexKey, key+":") {
+			delete(w.ensuredIndexes, indexKey)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit ducklake table recreation for resync: %w", err)
+	}
+	w.ensuredTables[key] = columnsFingerprint(columns)
+	return nil
+}
+
+func (w *Writer) captureReadyLogicalIndexes(ctx context.Context, schema, table string) error {
+	if w.cfg.ExtensionPath == "" {
+		return nil
+	}
+	exists, err := w.tableExists(ctx, schema, table)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	stmt := fmt.Sprintf("SELECT column_name FROM ducklake_list_logical_indexes('%s', '%s', '%s')",
+		strings.ReplaceAll(w.catalogName, "'", "''"), strings.ReplaceAll(schema, "'", "''"),
+		strings.ReplaceAll(table, "'", "''"))
+	rows, err := w.db.QueryContext(ctx, stmt)
+	if err != nil {
+		return fmt.Errorf("list logical indexes for resync: %w", err)
+	}
+	defer rows.Close()
+	existing := make(map[string]bool, len(w.cfg.LogicalIndexes))
+	for _, raw := range w.cfg.LogicalIndexes {
+		existing[raw] = true
+	}
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			return err
+		}
+		spec := schema + "." + table + ":" + column
+		if !existing[spec] {
+			w.cfg.LogicalIndexes = append(w.cfg.LogicalIndexes, spec)
+			existing[spec] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if w.cfg.ExtensionPath != "" {
+		stmt := fmt.Sprintf("CALL ducklake_drop_logical_indexes('%s', '%s', '%s')",
+			strings.ReplaceAll(w.catalogName, "'", "''"), strings.ReplaceAll(schema, "'", "''"), strings.ReplaceAll(table, "'", "''"))
+		if _, err := tx.ExecContext(ctx, stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+			return fmt.Errorf("drop logical indexes: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", qname(w.catalogName, schema, table))); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit ducklake table drop: %w", err)
+	}
+	key := schema + "." + table
+	delete(w.ensuredTables, key)
+	for indexKey := range w.ensuredIndexes {
+		if strings.HasPrefix(indexKey, key+":") {
+			delete(w.ensuredIndexes, indexKey)
+		}
+	}
 	return nil
 }
 
@@ -230,6 +423,10 @@ func (w *Writer) HandleSchemaChange(ctx context.Context, rel *wal.RelationMessag
 	if tableExists && len(rel.Changes) > 0 {
 		tx, err := w.db.BeginTx(ctx, nil)
 		if err != nil {
+			return err
+		}
+		if err := w.invalidateChangedLogicalIndexes(ctx, tx, rel); err != nil {
+			_ = tx.Rollback()
 			return err
 		}
 		if err := w.applySchemaChanges(ctx, tx, rel, defaults); err != nil {
@@ -412,6 +609,18 @@ func (w *Writer) flushKeys(ctx context.Context, keys []string) error {
 		return fmt.Errorf("commit ducklake flush: %w", err)
 	}
 	committed = true
+	// The table and its first files must have committed IDs before an index can be created/backfilled.
+	// Clear the durable buffers before index setup so an index error cannot cause duplicate replay in this writer.
+	for _, ft := range flushed {
+		ft.buf.Rows = nil
+		ft.buf.Deletes = nil
+		ft.buf.FirstLSN = 0
+	}
+	for _, ft := range flushed {
+		if err := w.ensureLogicalIndexesForTable(ctx, conn, ft.buf.Schema, ft.buf.Table); err != nil {
+			return err
+		}
+	}
 	duration := time.Since(start)
 	for _, ft := range flushed {
 		w.logger.Info("ducklake flush completed",
@@ -422,9 +631,6 @@ func (w *Writer) flushKeys(ctx context.Context, keys []string) error {
 			"mutation_mode", "delete_insert",
 			"duration_ms", duration.Milliseconds(),
 		)
-		ft.buf.Rows = nil
-		ft.buf.Deletes = nil
-		ft.buf.FirstLSN = 0
 	}
 	return nil
 }
@@ -436,6 +642,91 @@ type ducklakeExecer interface {
 type ducklakeQueryExecer interface {
 	ducklakeExecer
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+type logicalIndexSpec struct {
+	Schema string
+	Table  string
+	Column string
+}
+
+func parseLogicalIndexSpec(raw string) (logicalIndexSpec, error) {
+	colon := strings.LastIndex(raw, ":")
+	if colon <= 0 || colon == len(raw)-1 {
+		return logicalIndexSpec{}, fmt.Errorf("logical index %q must use schema.table:column", raw)
+	}
+	tableName, column := raw[:colon], raw[colon+1:]
+	dot := strings.Index(tableName, ".")
+	if dot <= 0 || dot == len(tableName)-1 || strings.Contains(tableName[dot+1:], ".") {
+		return logicalIndexSpec{}, fmt.Errorf("logical index %q must use schema.table:column", raw)
+	}
+	return logicalIndexSpec{Schema: tableName[:dot], Table: tableName[dot+1:], Column: column}, nil
+}
+
+func (w *Writer) ensureExistingLogicalIndexes(ctx context.Context) error {
+	if len(w.cfg.LogicalIndexes) == 0 {
+		return nil
+	}
+	if normalizedCatalogStore(w.cfg.CatalogStore) != "duckdb" {
+		return fmt.Errorf("logical indexes require a DuckDB-backed DuckLake catalog")
+	}
+	for _, raw := range w.cfg.LogicalIndexes {
+		spec, err := parseLogicalIndexSpec(raw)
+		if err != nil {
+			return err
+		}
+		exists, err := w.tableExists(ctx, spec.Schema, spec.Table)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue // The first relation/flush creates the table and index.
+		}
+		if err := w.ensureLogicalIndex(ctx, w.db, spec); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (w *Writer) ensureLogicalIndexesForTable(ctx context.Context, tx ducklakeExecer, schema, table string) error {
+	for _, raw := range w.cfg.LogicalIndexes {
+		spec, err := parseLogicalIndexSpec(raw)
+		if err != nil {
+			return err
+		}
+		if spec.Schema == schema && spec.Table == table {
+			if err := w.ensureLogicalIndex(ctx, tx, spec); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (w *Writer) ensureLogicalIndex(ctx context.Context, tx ducklakeExecer, spec logicalIndexSpec) error {
+	started := time.Now()
+	key := spec.Schema + "." + spec.Table + ":" + spec.Column
+	if w.ensuredIndexes[key] {
+		return nil
+	}
+	catalog := quoteIdent(w.catalogName)
+	schema := strings.ReplaceAll(spec.Schema, "'", "''")
+	table := strings.ReplaceAll(spec.Table, "'", "''")
+	column := strings.ReplaceAll(spec.Column, "'", "''")
+	statements := []string{
+		fmt.Sprintf("CALL %s.set_option('data_inlining_row_limit', 0, schema => '%s', table_name => '%s')", catalog, schema, table),
+		fmt.Sprintf("CALL ducklake_flush_inlined_data('%s', schema_name => '%s', table_name => '%s')", strings.ReplaceAll(w.catalogName, "'", "''"), schema, table),
+		fmt.Sprintf("CALL ducklake_create_logical_index('%s', '%s', '%s', '%s')", strings.ReplaceAll(w.catalogName, "'", "''"), schema, table, column),
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("ensure logical index %s: %w", key, err)
+		}
+	}
+	w.ensuredIndexes[key] = true
+	w.logger.Info("ducklake logical index ready", "table", spec.Schema+"."+spec.Table, "column", spec.Column, "type", "BIGINT", "ensure_duration_ms", time.Since(started).Milliseconds())
+	return nil
 }
 
 func (w *Writer) ensureTableForFlush(ctx context.Context, conn *sql.Conn, key string, buf *tableBuffer) error {
@@ -565,6 +856,25 @@ func (w *Writer) Truncate(ctx context.Context, event wal.RowEvent) error {
 		buf.LastLSN = event.WALStartLSN
 	}
 	delete(w.ensuredTables, event.Schema+"."+event.Table)
+	return nil
+}
+
+func (w *Writer) invalidateChangedLogicalIndexes(ctx context.Context, tx ducklakeExecer, rel *wal.RelationMessage) error {
+	if w.cfg.ExtensionPath == "" {
+		return nil
+	}
+	for _, change := range rel.Changes {
+		if change.Type != wal.SchemaChangeDrop && change.Type != wal.SchemaChangeTypeChange {
+			continue
+		}
+		stmt := fmt.Sprintf("CALL ducklake_invalidate_logical_index('%s', '%s', '%s', '%s')",
+			strings.ReplaceAll(w.catalogName, "'", "''"), strings.ReplaceAll(rel.Namespace, "'", "''"),
+			strings.ReplaceAll(rel.Name, "'", "''"), strings.ReplaceAll(change.Column, "'", "''"))
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("invalidate logical index for %s.%s:%s: %w", rel.Namespace, rel.Name, change.Column, err)
+		}
+		delete(w.ensuredIndexes, rel.Namespace+"."+rel.Name+":"+change.Column)
+	}
 	return nil
 }
 

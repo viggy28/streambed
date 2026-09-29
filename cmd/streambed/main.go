@@ -57,6 +57,8 @@ func main() {
 	syncCmd.Flags().StringVar(&cfg.DuckLakeCatalog, "ducklake-catalog", cfg.DuckLakeCatalog, "DuckLake catalog path")
 	syncCmd.Flags().StringVar(&cfg.DuckLakeCatalogStore, "ducklake-catalog-store", cfg.DuckLakeCatalogStore, "DuckLake catalog store: sqlite or duckdb")
 	syncCmd.Flags().StringVar(&cfg.DuckLakeDataPath, "ducklake-data-path", cfg.DuckLakeDataPath, "DuckLake data path (defaults to s3://bucket/prefix/ducklake/)")
+	syncCmd.Flags().StringVar(&cfg.DuckLakeExtension, "ducklake-extension", cfg.DuckLakeExtension, "Path to a pinned DuckLake extension binary")
+	syncCmd.Flags().StringSliceVar(&cfg.LogicalIndexes, "logical-index", cfg.LogicalIndexes, "BIGINT logical index as schema.table:column (repeatable)")
 	syncCmd.Flags().StringVar(&cfg.SlotName, "slot-name", cfg.SlotName, "Replication slot name")
 	syncCmd.Flags().IntVar(&cfg.FlushRows, "flush-rows", cfg.FlushRows, "Row buffer flush threshold")
 	syncCmd.Flags().DurationVar(&cfg.FlushInterval, "flush-interval", cfg.FlushInterval, "Time-based flush interval")
@@ -81,6 +83,7 @@ func main() {
 	queryCmd.Flags().StringVar(&cfg.DuckLakeCatalog, "ducklake-catalog", cfg.DuckLakeCatalog, "DuckLake catalog path")
 	queryCmd.Flags().StringVar(&cfg.DuckLakeCatalogStore, "ducklake-catalog-store", cfg.DuckLakeCatalogStore, "DuckLake catalog store: sqlite or duckdb")
 	queryCmd.Flags().StringVar(&cfg.DuckLakeDataPath, "ducklake-data-path", cfg.DuckLakeDataPath, "DuckLake data path (defaults to s3://bucket/prefix/ducklake/)")
+	queryCmd.Flags().StringVar(&cfg.DuckLakeExtension, "ducklake-extension", cfg.DuckLakeExtension, "Path to a pinned DuckLake extension binary")
 	queryCmd.Flags().StringVar(&cfg.QueryAddr, "listen-addr", cfg.QueryAddr, "Listen address for query server")
 	queryCmd.Flags().StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level (DEBUG, INFO, WARN, ERROR)")
 
@@ -205,6 +208,8 @@ snapshot LSN are silently discarded for this table to avoid duplicates.`,
 	resyncCmd.Flags().StringVar(&cfg.DuckLakeCatalog, "ducklake-catalog", cfg.DuckLakeCatalog, "DuckLake catalog path")
 	resyncCmd.Flags().StringVar(&cfg.DuckLakeCatalogStore, "ducklake-catalog-store", cfg.DuckLakeCatalogStore, "DuckLake catalog store: sqlite or duckdb")
 	resyncCmd.Flags().StringVar(&cfg.DuckLakeDataPath, "ducklake-data-path", cfg.DuckLakeDataPath, "DuckLake data path (defaults to s3://bucket/prefix/ducklake/)")
+	resyncCmd.Flags().StringVar(&cfg.DuckLakeExtension, "ducklake-extension", cfg.DuckLakeExtension, "Path to a pinned DuckLake extension binary")
+	resyncCmd.Flags().StringSliceVar(&cfg.LogicalIndexes, "logical-index", cfg.LogicalIndexes, "BIGINT logical index as schema.table:column (repeatable)")
 	resyncCmd.Flags().IntVar(&cfg.FlushRows, "flush-rows", cfg.FlushRows, "Rows per parquet file / Iceberg snapshot")
 	resyncCmd.Flags().StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level (DEBUG, INFO, WARN, ERROR)")
 
@@ -243,6 +248,10 @@ func runSync(cmd *cobra.Command, args []string) error {
 			cfg.DuckLakeCatalogStore = strings.ToLower(f.Value.String())
 		case "ducklake-data-path":
 			cfg.DuckLakeDataPath = f.Value.String()
+		case "ducklake-extension":
+			cfg.DuckLakeExtension = f.Value.String()
+		case "logical-index":
+			cfg.LogicalIndexes, _ = cmd.Flags().GetStringSlice("logical-index")
 		case "slot-name":
 			cfg.SlotName = f.Value.String()
 		case "flush-rows":
@@ -318,11 +327,13 @@ func runSync(cmd *cobra.Command, args []string) error {
 	makeWriter := func() (pipeline.Writer, error) {
 		if cfg.TargetFormat == "ducklake" {
 			w, err := ducklake.NewWriter(ctx, ducklake.Config{
-				CatalogPath:  cfg.DuckLakeCatalog,
-				CatalogStore: cfg.DuckLakeCatalogStore,
-				DataPath:     cfg.EffectiveDuckLakeDataPath(),
-				S3Endpoint:   cfg.S3Endpoint,
-				S3Region:     cfg.S3Region,
+				CatalogPath:    cfg.DuckLakeCatalog,
+				CatalogStore:   cfg.DuckLakeCatalogStore,
+				DataPath:       cfg.EffectiveDuckLakeDataPath(),
+				S3Endpoint:     cfg.S3Endpoint,
+				S3Region:       cfg.S3Region,
+				ExtensionPath:  cfg.DuckLakeExtension,
+				LogicalIndexes: cfg.LogicalIndexes,
 			}, stateStore, cfg.FlushRows, cfg.FlushInterval, logger)
 			if err != nil {
 				return nil, err
@@ -361,6 +372,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 			DuckLakeCatalog:      cfg.DuckLakeCatalog,
 			DuckLakeCatalogStore: cfg.DuckLakeCatalogStore,
 			DuckLakeDataPath:     cfg.EffectiveDuckLakeDataPath(),
+			DuckLakeExtension:    cfg.DuckLakeExtension,
 		}, s3Client, logger)
 		if err != nil {
 			return fmt.Errorf("create query server: %w", err)
@@ -612,6 +624,8 @@ func runQuery(cmd *cobra.Command, args []string) error {
 			cfg.DuckLakeCatalogStore = strings.ToLower(f.Value.String())
 		case "ducklake-data-path":
 			cfg.DuckLakeDataPath = f.Value.String()
+		case "ducklake-extension":
+			cfg.DuckLakeExtension = f.Value.String()
 		case "listen-addr":
 			cfg.QueryAddr = f.Value.String()
 		case "log-level":
@@ -664,6 +678,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		DuckLakeCatalog:      cfg.DuckLakeCatalog,
 		DuckLakeCatalogStore: cfg.DuckLakeCatalogStore,
 		DuckLakeDataPath:     cfg.EffectiveDuckLakeDataPath(),
+		DuckLakeExtension:    cfg.DuckLakeExtension,
 	}, s3Client, logger)
 	if err != nil {
 		return fmt.Errorf("create query server: %w", err)
@@ -1097,6 +1112,10 @@ func runResync(cmd *cobra.Command, table string, force bool) error {
 			cfg.DuckLakeCatalogStore = strings.ToLower(f.Value.String())
 		case "ducklake-data-path":
 			cfg.DuckLakeDataPath = f.Value.String()
+		case "ducklake-extension":
+			cfg.DuckLakeExtension = f.Value.String()
+		case "logical-index":
+			cfg.LogicalIndexes, _ = cmd.Flags().GetStringSlice("logical-index")
 		case "flush-rows":
 			if n, err := strconv.Atoi(f.Value.String()); err == nil && n > 0 {
 				cfg.FlushRows = n
@@ -1221,11 +1240,13 @@ func runResync(cmd *cobra.Command, table string, force bool) error {
 	// 4. Run the backfill.
 	if cfg.TargetFormat == "ducklake" {
 		writer, err := ducklake.NewWriter(ctx, ducklake.Config{
-			CatalogPath:  cfg.DuckLakeCatalog,
-			CatalogStore: cfg.DuckLakeCatalogStore,
-			DataPath:     cfg.EffectiveDuckLakeDataPath(),
-			S3Endpoint:   cfg.S3Endpoint,
-			S3Region:     cfg.S3Region,
+			CatalogPath:    cfg.DuckLakeCatalog,
+			CatalogStore:   cfg.DuckLakeCatalogStore,
+			DataPath:       cfg.EffectiveDuckLakeDataPath(),
+			S3Endpoint:     cfg.S3Endpoint,
+			S3Region:       cfg.S3Region,
+			ExtensionPath:  cfg.DuckLakeExtension,
+			LogicalIndexes: cfg.LogicalIndexes,
 		}, stateStore, cfg.FlushRows, cfg.FlushInterval, logger)
 		if err != nil {
 			return fmt.Errorf("create ducklake writer: %w", err)

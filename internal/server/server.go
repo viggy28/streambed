@@ -29,6 +29,7 @@ type ServerConfig struct {
 	DuckLakeCatalog      string
 	DuckLakeCatalogStore string
 	DuckLakeDataPath     string
+	DuckLakeExtension    string
 }
 
 // Server implements a Postgres-wire-compatible query interface backed by DuckDB.
@@ -47,24 +48,22 @@ func NewServer(cfg ServerConfig, s3Client storage.ObjectStorage, logger *slog.Lo
 	if cfg.TargetFormat == "" {
 		cfg.TargetFormat = "iceberg"
 	}
-	db, err := sql.Open("duckdb", "")
-	if err != nil {
-		return nil, fmt.Errorf("open duckdb: %w", err)
-	}
+	var db *sql.DB
+	var err error
 	var catalog *TableCatalog
 	if cfg.TargetFormat == "ducklake" {
 		// The query server owns an isolated, read-only DuckDB session so client
 		// SQL cannot mutate the writer's DuckLake attachment.
-		db.SetMaxOpenConns(1)
-		if err := ducklake.Configure(context.Background(), db, ducklake.Config{
-			CatalogPath:  cfg.DuckLakeCatalog,
-			CatalogStore: cfg.DuckLakeCatalogStore,
-			DataPath:     cfg.DuckLakeDataPath,
-			S3Endpoint:   cfg.S3Endpoint,
-			S3Region:     cfg.S3Region,
-			ReadOnly:     true,
-		}); err != nil {
-			db.Close()
+		db, err = ducklake.Open(context.Background(), ducklake.Config{
+			CatalogPath:   cfg.DuckLakeCatalog,
+			CatalogStore:  cfg.DuckLakeCatalogStore,
+			DataPath:      cfg.DuckLakeDataPath,
+			S3Endpoint:    cfg.S3Endpoint,
+			ExtensionPath: cfg.DuckLakeExtension,
+			S3Region:      cfg.S3Region,
+			ReadOnly:      true,
+		})
+		if err != nil {
 			return nil, fmt.Errorf("configure ducklake: %w", err)
 		}
 		if err := configureDuckLakeQuerySession(db); err != nil {
@@ -72,6 +71,10 @@ func NewServer(cfg ServerConfig, s3Client storage.ObjectStorage, logger *slog.Lo
 			return nil, err
 		}
 	} else {
+		db, err = sql.Open("duckdb", "")
+		if err != nil {
+			return nil, fmt.Errorf("open duckdb: %w", err)
+		}
 		conn, _ := db.Conn(context.Background())
 		// configure DuckDB on a specific connection
 		configureDuckDBPerConn(context.Background(), conn, cfg)
@@ -91,21 +94,17 @@ func NewServer(cfg ServerConfig, s3Client storage.ObjectStorage, logger *slog.Lo
 }
 
 func (s *Server) resetDuckLakeQueryDB(ctx context.Context) error {
-	db, err := sql.Open("duckdb", "")
+	db, err := ducklake.Open(ctx, ducklake.Config{
+		CatalogPath:   s.cfg.DuckLakeCatalog,
+		CatalogStore:  s.cfg.DuckLakeCatalogStore,
+		DataPath:      s.cfg.DuckLakeDataPath,
+		S3Endpoint:    s.cfg.S3Endpoint,
+		ExtensionPath: s.cfg.DuckLakeExtension,
+		S3Region:      s.cfg.S3Region,
+		ReadOnly:      true,
+	})
 	if err != nil {
-		return fmt.Errorf("open fresh duckdb query session: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	if err := ducklake.Configure(ctx, db, ducklake.Config{
-		CatalogPath:  s.cfg.DuckLakeCatalog,
-		CatalogStore: s.cfg.DuckLakeCatalogStore,
-		DataPath:     s.cfg.DuckLakeDataPath,
-		S3Endpoint:   s.cfg.S3Endpoint,
-		S3Region:     s.cfg.S3Region,
-		ReadOnly:     true,
-	}); err != nil {
-		db.Close()
-		return fmt.Errorf("configure fresh ducklake query session: %w", err)
+		return fmt.Errorf("configure fresh duckdb query session: %w", err)
 	}
 	if err := configureDuckLakeQuerySession(db); err != nil {
 		db.Close()

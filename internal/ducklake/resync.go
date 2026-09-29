@@ -42,8 +42,8 @@ func RunResync(ctx context.Context, opts ResyncOptions) (ResyncStats, error) {
 	for i, c := range columns {
 		walColumns[i] = wal.Column{Name: c.Name, OID: c.OID}
 	}
-	if err := opts.Writer.DropTable(ctx, opts.Schema, opts.Table); err != nil {
-		return stats, fmt.Errorf("drop existing ducklake table: %w", err)
+	if err := opts.Writer.RecreateTableForResync(ctx, opts.Schema, opts.Table, walColumns); err != nil {
+		return stats, fmt.Errorf("recreate ducklake table for resync: %w", err)
 	}
 	slotName := "sb_resync_" + strings.ReplaceAll(uuid.New().String(), "-", "")[:16]
 	tmp, err := wal.CreateTempSlotWithSnapshot(ctx, opts.ReplConn, slotName, opts.Logger)
