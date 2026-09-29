@@ -247,6 +247,119 @@ func (w *Writer) Close() error {
 	return w.db.Close()
 }
 
+// RecreateTableForResync preserves READY logical-index declarations while replacing
+// the target table. Resync is a truncate-and-reload operation from the user's
+// perspective, so the internal DROP must not silently remove persistent indexes.
+func (w *Writer) RecreateTableForResync(ctx context.Context, schema, table string, columns []wal.Column) error {
+	if err := w.captureReadyLogicalIndexes(ctx, schema, table); err != nil {
+		return err
+	}
+
+	// Keep the old table and its durable declarations intact if any part of the
+	// replacement fails. Otherwise a retry without --logical-index would have
+	// nothing persistent left to recover.
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if w.cfg.ExtensionPath != "" {
+		stmt := fmt.Sprintf("CALL ducklake_drop_logical_indexes('%s', '%s', '%s')",
+			strings.ReplaceAll(w.catalogName, "'", "''"), strings.ReplaceAll(schema, "'", "''"), strings.ReplaceAll(table, "'", "''"))
+		if _, err := tx.ExecContext(ctx, stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+			return fmt.Errorf("drop logical indexes for resync: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", qname(w.catalogName, schema, table))); err != nil {
+		return err
+	}
+	if err := w.ensureTable(ctx, tx, schema, table, columns); err != nil {
+		return err
+	}
+	if err := w.reconcileTableSchema(ctx, tx, schema, table, columns); err != nil {
+		return err
+	}
+
+	// Recreate existing READY indexes for the new table. Only call ducklake_create_logical_index;
+	// other setup happens after resync starts processing data.
+	if w.cfg.ExtensionPath != "" {
+		stmt := fmt.Sprintf("SELECT column_name FROM ducklake_list_logical_indexes('%s', '%s', '%s')",
+			strings.ReplaceAll(w.catalogName, "'", "''"), strings.ReplaceAll(schema, "'", "''"), strings.ReplaceAll(table, "'", "''"))
+		rows, err := tx.QueryContext(ctx, stmt)
+		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+			return fmt.Errorf("list logical indexes for resync: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var column string
+			if err := rows.Scan(&column); err != nil {
+				return err
+			}
+			schemaStr := strings.ReplaceAll(schema, "'", "''")
+			tableStr := strings.ReplaceAll(table, "'", "''")
+			columnStr := strings.ReplaceAll(column, "'", "''")
+			createStmt := fmt.Sprintf("CALL ducklake_create_logical_index('%s', '%s', '%s', '%s')",
+				strings.ReplaceAll(w.catalogName, "'", "''"), schemaStr, tableStr, columnStr)
+			if _, err := tx.ExecContext(ctx, createStmt); err != nil {
+				return fmt.Errorf("create logical index %s for resync: %w", column, err)
+			}
+		}
+	}
+
+	key := schema + "." + table
+	delete(w.ensuredTables, key)
+	for indexKey := range w.ensuredIndexes {
+		if strings.HasPrefix(indexKey, key+":") {
+			delete(w.ensuredIndexes, indexKey)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit ducklake table recreation for resync: %w", err)
+	}
+	w.ensuredTables[key] = columnsFingerprint(columns)
+	return nil
+}
+
+func (w *Writer) captureReadyLogicalIndexes(ctx context.Context, schema, table string) error {
+	if w.cfg.ExtensionPath == "" {
+		return nil
+	}
+	exists, err := w.tableExists(ctx, schema, table)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	stmt := fmt.Sprintf("SELECT column_name FROM ducklake_list_logical_indexes('%s', '%s', '%s')",
+		strings.ReplaceAll(w.catalogName, "'", "''"), strings.ReplaceAll(schema, "'", "''"),
+		strings.ReplaceAll(table, "'", "''"))
+	rows, err := w.db.QueryContext(ctx, stmt)
+	if err != nil {
+		return fmt.Errorf("list logical indexes for resync: %w", err)
+	}
+	defer rows.Close()
+	existing := make(map[string]bool, len(w.cfg.LogicalIndexes))
+	for _, raw := range w.cfg.LogicalIndexes {
+		existing[raw] = true
+	}
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			return err
+		}
+		spec := schema + "." + table + ":" + column
+		if !existing[spec] {
+			w.cfg.LogicalIndexes = append(w.cfg.LogicalIndexes, spec)
+			existing[spec] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
 	tx, err := w.db.BeginTx(ctx, nil)
 	if err != nil {

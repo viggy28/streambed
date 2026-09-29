@@ -36,7 +36,8 @@ V1 recognizes `column = BIGINT constant` and its commuted form. Ranges, `IN`, pa
 - New-file mappings commit atomically with DuckLake file metadata.
 - Stale mappings are safe: candidates are intersected with snapshot-visible files and DuckDB still evaluates the predicate.
 - Indexed tables persist `data_inlining_row_limit = 0`; existing inlined rows are flushed before backfill.
-- Dropping an indexed table removes its definitions and mappings in the same Streambed transaction as the table drop.
+- Dropping an indexed source table removes its definitions and mappings in the same Streambed transaction as the table drop.
+- `streambed resync` is treated as truncate-and-reload: Streambed captures `READY` declarations by column name, removes stale table IDs and mappings, recreates the empty table and indexes, then incrementally maps every reloaded file. The declarations survive even when the resync run omits `--logical-index`.
 - Dropping or changing the indexed column marks the definition `INVALID` before schema evolution.
 - V1 assumes Streambed is the sole DuckLake writer. Do not write to an indexed catalog through stock DuckLake or another process.
 
@@ -44,7 +45,7 @@ Metadata is stored in the DuckLake catalog as one row per `(index_id, value, dat
 
 ## Validation evidence
 
-The extension SQL logic test covers backfill rollback, normal and commuted equality, absent values, UPDATE replacement files, time-travel fallback, signed boundaries, incremental maintenance, idempotent creation, prepare-without-side-effects, invalidation, and cleanup. Streambed's extension-backed Go test covers failed-publication rollback, restart persistence, rejection of the stock extension, CDC-style key updates, schema invalidation, and table-drop cleanup. The segmented DuckLake debug suite passed except `concurrent_table_creation.test_slow`; the same snapshot-retry exhaustion reproduced on an isolated, unmodified upstream v1.5 worktree.
+The extension SQL logic test covers backfill rollback, normal and commuted equality, absent values, UPDATE replacement files, time-travel fallback, signed boundaries, incremental maintenance, idempotent creation, prepare-without-side-effects, invalidation, and cleanup. Streambed's extension-backed Go test covers failed-publication rollback, restart and resync persistence, rejection of the stock extension, CDC-style key updates, schema invalidation, and table-drop cleanup. The segmented DuckLake debug suite passed except `concurrent_table_creation.test_slow`; the same snapshot-retry exhaustion reproduced on an isolated, unmodified upstream v1.5 worktree.
 
 A public-boundary E2E run used the compiled `streambed` CLI, PostgreSQL logical replication, the psql-wire query endpoint, and the DuckLake metadata catalog. After three initial files, a PostgreSQL key update from `42` to `43` removed the old result, returned the updated row, and `EXPLAIN ANALYZE` reported `Total Files Read: 1`. Restarting Streambed without `--logical-index`, then inserting `777`, preserved the `READY` definition and created the new value mapping.
 
