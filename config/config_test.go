@@ -155,6 +155,22 @@ func TestValidate(t *testing.T) {
 		}, "ducklake-catalog is required"},
 		{"invalid ducklake catalog store", func(c *Config) { c.DuckLakeCatalogStore = "mysql" }, "ducklake-catalog-store must be one of"},
 		{"valid duckdb catalog store", func(c *Config) { c.DuckLakeCatalogStore = "duckdb" }, ""},
+		{"logical index requires ducklake", func(c *Config) { c.LogicalIndexes = []string{"public.t:id"} }, "logical-index requires target-format=ducklake"},
+		{"logical index requires duckdb catalog", func(c *Config) {
+			c.TargetFormat = "ducklake"
+			c.LogicalIndexes = []string{"public.t:id"}
+		}, "logical-index requires ducklake-catalog-store=duckdb"},
+		{"logical index requires extension", func(c *Config) {
+			c.TargetFormat = "ducklake"
+			c.DuckLakeCatalogStore = "duckdb"
+			c.LogicalIndexes = []string{"public.t:id"}
+		}, "logical-index requires ducklake-extension"},
+		{"valid logical index", func(c *Config) {
+			c.TargetFormat = "ducklake"
+			c.DuckLakeCatalogStore = "duckdb"
+			c.DuckLakeExtension = "/tmp/ducklake.duckdb_extension"
+			c.LogicalIndexes = []string{"public.t:id"}
+		}, ""},
 		{"valid config", func(c *Config) {}, ""},
 	}
 

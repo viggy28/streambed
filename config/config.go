@@ -15,10 +15,12 @@ type Config struct {
 	S3Endpoint           string
 	S3Region             string
 	StatePath            string
-	TargetFormat         string // lakehouse target: "iceberg" or "ducklake"
-	DuckLakeCatalog      string // catalog DB path for DuckLake metadata
-	DuckLakeCatalogStore string // DuckLake catalog store: "duckdb" (default) or "sqlite"
-	DuckLakeDataPath     string // DuckLake data path (defaults to s3://bucket/prefix/ducklake/)
+	TargetFormat         string   // lakehouse target: "iceberg" or "ducklake"
+	DuckLakeCatalog      string   // catalog DB path for DuckLake metadata
+	DuckLakeCatalogStore string   // DuckLake catalog store: "duckdb" (default) or "sqlite"
+	DuckLakeDataPath     string   // DuckLake data path (defaults to s3://bucket/prefix/ducklake/)
+	DuckLakeExtension    string   // optional path to a pinned DuckLake extension binary
+	LogicalIndexes       []string // persistent BIGINT indexes as schema.table:column
 	SlotName             string
 	FlushRows            int
 	FlushInterval        time.Duration
@@ -98,6 +100,12 @@ func Load() *Config {
 	if v := os.Getenv("STREAMBED_DUCKLAKE_DATA_PATH"); v != "" {
 		cfg.DuckLakeDataPath = v
 	}
+	if v := os.Getenv("STREAMBED_DUCKLAKE_EXTENSION"); v != "" {
+		cfg.DuckLakeExtension = v
+	}
+	if v := os.Getenv("STREAMBED_LOGICAL_INDEXES"); v != "" {
+		cfg.LogicalIndexes = splitTables(v)
+	}
 	if v := os.Getenv("STREAMBED_SLOT_NAME"); v != "" {
 		cfg.SlotName = v
 	}
@@ -165,6 +173,28 @@ func (c *Config) Validate() error {
 	}
 	if c.DuckLakeCatalogStore != "sqlite" && c.DuckLakeCatalogStore != "duckdb" {
 		return fmt.Errorf("ducklake-catalog-store must be one of: sqlite, duckdb")
+	}
+	if len(c.LogicalIndexes) > 0 {
+		if c.TargetFormat != "ducklake" {
+			return fmt.Errorf("logical-index requires target-format=ducklake")
+		}
+		if c.DuckLakeCatalogStore != "duckdb" {
+			return fmt.Errorf("logical-index requires ducklake-catalog-store=duckdb")
+		}
+		if c.DuckLakeExtension == "" {
+			return fmt.Errorf("logical-index requires ducklake-extension pointing to the Streambed DuckLake build")
+		}
+		for _, index := range c.LogicalIndexes {
+			colon := strings.LastIndex(index, ":")
+			if colon <= 0 || colon == len(index)-1 {
+				return fmt.Errorf("logical-index %q must use schema.table:column", index)
+			}
+			table := index[:colon]
+			dot := strings.Index(table, ".")
+			if dot <= 0 || dot == len(table)-1 || strings.Contains(table[dot+1:], ".") {
+				return fmt.Errorf("logical-index %q must use schema.table:column", index)
+			}
+		}
 	}
 	if c.FlushRows <= 0 {
 		return fmt.Errorf("flush-rows must be positive")
