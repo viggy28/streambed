@@ -194,7 +194,7 @@ func TestBigIntLogicalIndexBackfillMaintenanceAndPruning(t *testing.T) {
 	}, nil, 100, time.Hour, slog.New(slog.NewTextHandler(os.Stderr, nil))); stockErr == nil {
 		_ = stockWriter.Close()
 		t.Fatal("reopening an indexed catalog without the Streambed extension unexpectedly succeeded")
-	} else if !strings.Contains(stockErr.Error(), "ducklake-extension is required") {
+	} else if !strings.Contains(stockErr.Error(), "the Streambed DuckLake extension must be loaded for all writes") {
 		t.Fatalf("unexpected missing-extension error: %v", stockErr)
 	}
 

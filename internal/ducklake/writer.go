@@ -125,7 +125,7 @@ func rejectUnmaintainableLogicalIndexes(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("inspect ducklake logical indexes: %w", err)
 	}
 	if definitions > 0 {
-		return fmt.Errorf("ducklake catalog contains persistent logical indexes; ducklake-extension is required to maintain them")
+		return fmt.Errorf("catalog contains Streambed logical indexes; the Streambed DuckLake extension must be loaded for all writes")
 	}
 	return nil
 }
