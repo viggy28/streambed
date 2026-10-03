@@ -3,6 +3,7 @@ cmd/streambed/streambed
 streambed
 /simtest
 simtest-logs/
+demo/hn/.local/
 .claude
 .pi-subagents/
 
