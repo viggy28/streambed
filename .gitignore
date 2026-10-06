@@ -4,6 +4,9 @@ streambed
 /simtest
 simtest-logs/
 demo/hn/.local/
+demo/hn/cloudflare/node_modules/
+demo/hn/cloudflare/.wrangler/
+demo/hn/cloudflare/.dev.vars*
 .claude
 .pi-subagents/
 
