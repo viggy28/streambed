@@ -50,11 +50,12 @@ const (
 // Server implements a Postgres-wire-compatible query interface backed by DuckDB.
 // It serves Iceberg views or tables from an attached DuckLake catalog.
 type Server struct {
-	cfg      ServerConfig
-	catalog  *TableCatalog
-	duckDB   *sql.DB
-	duckDBMu sync.Mutex
-	logger   *slog.Logger
+	cfg                ServerConfig
+	catalog            *TableCatalog
+	duckDB             *sql.DB
+	duckDBMu           sync.Mutex
+	logger             *slog.Logger
+	refreshBeforeQuery bool
 }
 
 // QueryColumn describes one column in an HTTP query result.
@@ -271,7 +272,7 @@ func sqlString(value string) string {
 // Iceberg mode refreshes discovered views in the background; DuckLake mode uses
 // its attached catalog directly. Start blocks until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) error {
-	s.startCatalogRefresh(ctx)
+	s.startCatalogRefresh(ctx, true)
 
 	// Create psql-wire server
 	srv, err := wire.NewServer(s.handleParse,
@@ -305,22 +306,28 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) startCatalogRefresh(ctx context.Context) {
+func (s *Server) startCatalogRefresh(ctx context.Context, continuous bool) {
 	// Iceberg tables must be discovered in S3 and exposed as views. DuckLake
 	// tables are already visible through the directly attached catalog.
 	if s.cfg.TargetFormat == "ducklake" {
 		return
 	}
 	if err := s.refreshAndRegister(ctx); err != nil {
-		s.logger.Warn("initial catalog refresh failed (will retry)", "error", err)
+		s.logger.Warn("initial catalog refresh failed", "error", err)
 	}
-	go s.refreshLoop(ctx)
+	if continuous {
+		go s.refreshLoop(ctx)
+	}
 }
 
 // StartHTTP starts the guarded JSON-over-HTTP query API. It blocks until the
 // context is cancelled or the HTTP server fails.
 func (s *Server) StartHTTP(ctx context.Context, addr string) error {
-	s.startCatalogRefresh(ctx)
+	// Cloudflare Containers determine idleness from process activity. Refresh
+	// before each HTTP query instead of running the 30-second background loop,
+	// which would otherwise prevent the container from sleeping.
+	s.refreshBeforeQuery = true
+	s.startCatalogRefresh(ctx, false)
 	httpServer := &http.Server{
 		Addr:              addr,
 		Handler:           s.HTTPHandler(),
@@ -461,6 +468,12 @@ func (s *Server) Execute(ctx context.Context, query string) (*QueryResult, error
 	s.logger.Debug("query received", "query", query)
 	queryCtx, cancel := context.WithTimeout(ctx, s.cfg.QueryTimeout)
 	defer cancel()
+
+	if s.refreshBeforeQuery && s.cfg.TargetFormat != "ducklake" {
+		if err := s.refreshAndRegister(queryCtx); err != nil {
+			return nil, fmt.Errorf("refresh catalog: %w", err)
+		}
+	}
 
 	preparedQuery, err := prepareTimeTravelQuery(queryCtx, query, s.cfg.TargetFormat, s.catalog)
 	if err != nil {

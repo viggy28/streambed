@@ -6,6 +6,12 @@
   "observability": {
     "enabled": true
   },
+  "routes": [
+    {
+      "pattern": "demo.streambed.dev",
+      "custom_domain": true
+    }
+  ],
   "containers": [
     {
       "class_name": "QueryContainer",
