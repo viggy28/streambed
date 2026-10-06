@@ -125,13 +125,36 @@ if ! psql -w "$SOURCE_URL" -Atc \
   exit 1
 fi
 
-for poll in 1 2; do
-  echo "==> Running HN seed poll $poll/2"
-  HN_DATABASE_URL="$SOURCE_URL" "$BIN_DIR/hn-ingester" --once
-  sleep 4
-done
+echo "==> Running HN seed poll 1/2"
+HN_DATABASE_URL="$SOURCE_URL" "$BIN_DIR/hn-ingester" --once
 
 SNAPSHOTS_FILE="$LOCAL_DIR/r2-front-page-snapshots.tsv"
+for _ in $(seq 1 120); do
+  if "$BIN_DIR/streambed" snapshots \
+      --table=public.front_page \
+      --s3-bucket="$BUCKET" \
+      --s3-prefix="$PREFIX" \
+      --s3-endpoint="$S3_ENDPOINT" \
+      --s3-region=auto >"$SNAPSHOTS_FILE" 2>/dev/null; then
+    snapshot_count="$(tail -n +2 "$SNAPSHOTS_FILE" | grep -c . || true)"
+    [[ "$snapshot_count" -ge 1 ]] && break
+  fi
+  sleep 1
+done
+if [[ "${snapshot_count:-0}" -lt 1 ]]; then
+  echo "R2 seed did not produce the initial front_page snapshot" >&2
+  exit 1
+fi
+
+# Wait for the first snapshot before producing another transaction. Otherwise
+# both polls can be coalesced into one flush when the HN front page is stable.
+echo "==> Running HN seed poll 2/2"
+HN_DATABASE_URL="$SOURCE_URL" "$BIN_DIR/hn-ingester" --once
+# PostgreSQL emits this no-op UPDATE to logical replication, while the stored
+# values remain faithful to HN. It makes retained history deterministic.
+psql -w "$SOURCE_URL" -v ON_ERROR_STOP=1 -c \
+  'UPDATE front_page SET score = score WHERE rank = 1' >/dev/null
+
 for _ in $(seq 1 120); do
   if "$BIN_DIR/streambed" snapshots \
       --table=public.front_page \

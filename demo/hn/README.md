@@ -166,7 +166,7 @@ Build and deploy the Worker and container, then install the two R2 credentials a
 Query the deployed URL:
 
 ```bash
-export STREAMBED_DEMO_QUERY_URL='https://streambed-hn-demo.<workers-subdomain>.workers.dev/query'
+export STREAMBED_DEMO_QUERY_URL='https://demo.streambed.dev/query'
 ./demo/hn/scripts/smoke-test-http.sh
 ```
 
