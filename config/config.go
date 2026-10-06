@@ -9,7 +9,7 @@ import (
 )
 
 type Config struct {
-	SourceURL            string
+	SourceURL string
 	// PrimaryURL, if set, is used for write operations (CREATE PUBLICATION,
 	// metadata queries). Useful when --source-url points at a read-only
 	// hot-standby replica. Falls back to SourceURL when empty.
@@ -33,7 +33,9 @@ type Config struct {
 	ExcludeTables        []string
 	LogLevel             string
 	MutationMode         string // Iceberg row mutation strategy: "cow" or "mor"
-	QueryAddr            string // listen address for query server (e.g., ":5433")
+	QueryAddr            string // PostgreSQL-wire listen address (e.g., ":5433")
+	HTTPQueryAddr        string // HTTP query API listen address (e.g., ":8080")
+	QueryMemoryLimitMB   int    // DuckDB memory limit for query-only mode
 }
 
 func (c *Config) EffectivePrimaryURL() string {
@@ -57,6 +59,7 @@ func Default() *Config {
 		TargetFileSizeMB:     128,
 		LogLevel:             "INFO",
 		MutationMode:         "cow",
+		QueryMemoryLimitMB:   256,
 	}
 }
 
@@ -153,6 +156,14 @@ func Load() *Config {
 	if v := os.Getenv("STREAMBED_QUERY_ADDR"); v != "" {
 		cfg.QueryAddr = v
 	}
+	if v := os.Getenv("STREAMBED_HTTP_QUERY_ADDR"); v != "" {
+		cfg.HTTPQueryAddr = v
+	}
+	if v := os.Getenv("STREAMBED_QUERY_MEMORY_LIMIT_MB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.QueryMemoryLimitMB = n
+		}
+	}
 
 	return cfg
 }
@@ -240,8 +251,14 @@ func (c *Config) ValidateQuery() error {
 	if c.DuckLakeCatalogStore != "sqlite" && c.DuckLakeCatalogStore != "duckdb" {
 		return fmt.Errorf("ducklake-catalog-store must be one of: sqlite, duckdb")
 	}
-	if c.QueryAddr == "" {
-		return fmt.Errorf("listen-addr is required")
+	if c.QueryAddr == "" && c.HTTPQueryAddr == "" {
+		return fmt.Errorf("listen-addr or http-listen-addr is required")
+	}
+	if c.QueryAddr != "" && c.HTTPQueryAddr != "" {
+		return fmt.Errorf("listen-addr and http-listen-addr cannot be used together")
+	}
+	if c.QueryMemoryLimitMB < 64 {
+		return fmt.Errorf("query-memory-limit-mb must be at least 64")
 	}
 	return nil
 }

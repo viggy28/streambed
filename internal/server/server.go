@@ -3,8 +3,12 @@ package server
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -30,7 +34,18 @@ type ServerConfig struct {
 	DuckLakeCatalogStore string
 	DuckLakeDataPath     string
 	DuckLakeExtension    string
+	QueryTimeout         time.Duration
+	MaxResultRows        int
+	MaxResultBytes       int64
+	QueryMemoryLimitMB   int
 }
+
+const (
+	defaultQueryTimeout   = 10 * time.Second
+	defaultMaxResultRows  = 1000
+	defaultMaxResultBytes = 8 << 20
+	maxQueryBytes         = 64 << 10
+)
 
 // Server implements a Postgres-wire-compatible query interface backed by DuckDB.
 // It serves Iceberg views or tables from an attached DuckLake catalog.
@@ -42,11 +57,36 @@ type Server struct {
 	logger   *slog.Logger
 }
 
+// QueryColumn describes one column in an HTTP query result.
+type QueryColumn struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// QueryResult is the transport-neutral result of a guarded DuckDB query.
+type QueryResult struct {
+	Columns  []QueryColumn `json:"columns"`
+	Rows     [][]any       `json:"rows"`
+	RowCount int           `json:"row_count"`
+}
+
 // NewServer creates a query server and initializes DuckDB for the selected
 // lakehouse target.
 func NewServer(cfg ServerConfig, s3Client storage.ObjectStorage, logger *slog.Logger) (*Server, error) {
 	if cfg.TargetFormat == "" {
 		cfg.TargetFormat = "iceberg"
+	}
+	if cfg.QueryTimeout <= 0 {
+		cfg.QueryTimeout = defaultQueryTimeout
+	}
+	if cfg.MaxResultRows <= 0 {
+		cfg.MaxResultRows = defaultMaxResultRows
+	}
+	if cfg.MaxResultBytes <= 0 {
+		cfg.MaxResultBytes = defaultMaxResultBytes
+	}
+	if cfg.QueryMemoryLimitMB <= 0 {
+		cfg.QueryMemoryLimitMB = 256
 	}
 	var db *sql.DB
 	var err error
@@ -75,9 +115,8 @@ func NewServer(cfg ServerConfig, s3Client storage.ObjectStorage, logger *slog.Lo
 		if err != nil {
 			return nil, fmt.Errorf("open duckdb: %w", err)
 		}
-		conn, _ := db.Conn(context.Background())
-		// configure DuckDB on a specific connection
-		configureDuckDBPerConn(context.Background(), conn, cfg)
+		// Query execution is serialized, so keep one configured DuckDB connection.
+		db.SetMaxOpenConns(1)
 		if err := configureDuckDB(db, cfg); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("configure duckdb: %w", err)
@@ -143,64 +182,22 @@ func configureDuckLakeQuerySession(db *sql.DB) error {
 	return nil
 }
 
-// configureDuckDBPerConn configures DuckDB on a specific connection -- delete it
-func configureDuckDBPerConn(ctx context.Context, con *sql.Conn, cfg ServerConfig) error {
-	stmts := []string{
-		"INSTALL iceberg",
-		"LOAD iceberg",
-		"INSTALL httpfs",
-		"LOAD httpfs",
-		// icu provides timezone-aware operators like TIMESTAMPTZ - INTERVAL,
-		// which Postgres clients expect (e.g. NOW() - INTERVAL '7 days').
-		"INSTALL icu",
-		"LOAD icu",
-		"SET TimeZone = 'UTC'",
-	}
-
-	// Configure S3 access. Use GLOBAL scope so settings apply to every
-	// connection in the sql.DB pool, not just the one that ran the SET.
-	if cfg.S3Region != "" {
-		stmts = append(stmts, fmt.Sprintf("SET GLOBAL s3_region = '%s'", cfg.S3Region))
-	}
-	if cfg.S3Endpoint != "" {
-		// Strip protocol prefix for DuckDB — it expects host:port only
-		endpoint := cfg.S3Endpoint
-		endpoint = strings.TrimPrefix(endpoint, "http://")
-		endpoint = strings.TrimPrefix(endpoint, "https://")
-		stmts = append(stmts, fmt.Sprintf("SET GLOBAL s3_endpoint = '%s'", endpoint))
-		stmts = append(stmts, "SET GLOBAL s3_url_style = 'path'")
-		stmts = append(stmts, "SET GLOBAL s3_use_ssl = false")
-	}
-
-	// Use AWS credentials from environment.
-	// For custom endpoints (MinIO), fall back to minioadmin defaults
-	// to match the S3 client behavior in storage/s3.go.
-	key := os.Getenv("AWS_ACCESS_KEY_ID")
-	secret := os.Getenv("AWS_SECRET_ACCESS_KEY")
-	if key == "" && cfg.S3Endpoint != "" {
-		key = "minioadmin"
-	}
-	if secret == "" && cfg.S3Endpoint != "" {
-		secret = "minioadmin"
-	}
-	if key != "" {
-		stmts = append(stmts, fmt.Sprintf("SET GLOBAL s3_access_key_id = '%s'", key))
-	}
-	if secret != "" {
-		stmts = append(stmts, fmt.Sprintf("SET GLOBAL s3_secret_access_key = '%s'", secret))
-	}
-	for _, stmt := range stmts {
-		if _, err := con.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("exec %q: %w", stmt, err)
+// configureDuckDB installs the required extensions, configures scoped S3
+// access, and locks down the engine before it receives untrusted client SQL.
+func configureDuckDB(db *sql.DB, cfg ServerConfig) error {
+	for i, stmt := range duckDBConfigStatements(cfg) {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("configure duckdb statement %d: %w", i+1, err)
 		}
 	}
 	return nil
-
 }
 
-// configureDuckDB installs and loads the iceberg and httpfs extensions,
-// then configures S3 credentials for accessing Iceberg data.
-func configureDuckDB(db *sql.DB, cfg ServerConfig) error {
+func duckDBConfigStatements(cfg ServerConfig) []string {
+	memoryLimitMB := cfg.QueryMemoryLimitMB
+	if memoryLimitMB <= 0 {
+		memoryLimitMB = 256
+	}
 	stmts := []string{
 		"INSTALL iceberg",
 		"LOAD iceberg",
@@ -211,26 +208,12 @@ func configureDuckDB(db *sql.DB, cfg ServerConfig) error {
 		"INSTALL icu",
 		"LOAD icu",
 		"SET TimeZone = 'UTC'",
+		fmt.Sprintf("SET memory_limit = '%dMB'", memoryLimitMB),
+		"SET threads = 2",
+		"SET allow_community_extensions = false",
+		"SET allow_unsigned_extensions = false",
 	}
 
-	// Configure S3 access. Use GLOBAL scope so settings apply to every
-	// connection in the sql.DB pool, not just the one that ran the SET.
-	if cfg.S3Region != "" {
-		stmts = append(stmts, fmt.Sprintf("SET GLOBAL s3_region = '%s'", cfg.S3Region))
-	}
-	if cfg.S3Endpoint != "" {
-		// Strip protocol prefix for DuckDB — it expects host:port only
-		endpoint := cfg.S3Endpoint
-		endpoint = strings.TrimPrefix(endpoint, "http://")
-		endpoint = strings.TrimPrefix(endpoint, "https://")
-		stmts = append(stmts, fmt.Sprintf("SET GLOBAL s3_endpoint = '%s'", endpoint))
-		stmts = append(stmts, "SET GLOBAL s3_url_style = 'path'")
-		stmts = append(stmts, "SET GLOBAL s3_use_ssl = false")
-	}
-
-	// Use AWS credentials from environment.
-	// For custom endpoints (MinIO), fall back to minioadmin defaults
-	// to match the S3 client behavior in storage/s3.go.
 	key := os.Getenv("AWS_ACCESS_KEY_ID")
 	secret := os.Getenv("AWS_SECRET_ACCESS_KEY")
 	if key == "" && cfg.S3Endpoint != "" {
@@ -239,33 +222,56 @@ func configureDuckDB(db *sql.DB, cfg ServerConfig) error {
 	if secret == "" && cfg.S3Endpoint != "" {
 		secret = "minioadmin"
 	}
-	if key != "" {
-		stmts = append(stmts, fmt.Sprintf("SET GLOBAL s3_access_key_id = '%s'", key))
-	}
-	if secret != "" {
-		stmts = append(stmts, fmt.Sprintf("SET GLOBAL s3_secret_access_key = '%s'", secret))
+	if key != "" && secret != "" {
+		options := []string{
+			"TYPE S3",
+			"KEY_ID " + sqlString(key),
+			"SECRET " + sqlString(secret),
+		}
+		if token := os.Getenv("AWS_SESSION_TOKEN"); token != "" {
+			options = append(options, "SESSION_TOKEN "+sqlString(token))
+		}
+		if cfg.S3Region != "" {
+			options = append(options, "REGION "+sqlString(cfg.S3Region))
+		}
+		if cfg.S3Endpoint != "" {
+			useSSL := strings.HasPrefix(strings.ToLower(cfg.S3Endpoint), "https://")
+			endpoint := strings.TrimPrefix(cfg.S3Endpoint, "http://")
+			endpoint = strings.TrimPrefix(endpoint, "https://")
+			options = append(options,
+				"ENDPOINT "+sqlString(strings.TrimSuffix(endpoint, "/")),
+				"URL_STYLE 'path'",
+				fmt.Sprintf("USE_SSL %t", useSSL),
+			)
+		}
+		stmts = append(stmts, "CREATE OR REPLACE SECRET streambed_s3 ("+strings.Join(options, ", ")+")")
 	}
 
-	for _, stmt := range stmts {
-		if _, err := db.Exec(stmt); err != nil {
-			return fmt.Errorf("exec %q: %w", stmt, err)
-		}
+	allowedPrefix := "s3://" + cfg.S3Bucket + "/" + strings.TrimPrefix(cfg.S3Prefix, "/")
+	if !strings.HasSuffix(allowedPrefix, "/") {
+		allowedPrefix += "/"
 	}
-	return nil
+	allowedDirectories := []string{sqlString(allowedPrefix)}
+	if home, err := os.UserHomeDir(); err == nil {
+		allowedDirectories = append(allowedDirectories, sqlString(strings.TrimSuffix(home, "/")+"/.duckdb/extensions/"))
+	}
+	stmts = append(stmts,
+		"SET allowed_directories = ["+strings.Join(allowedDirectories, ", ")+"]",
+		"SET enable_external_access = false",
+		"SET lock_configuration = true",
+	)
+	return stmts
+}
+
+func sqlString(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 // Start begins listening for Postgres client connections and serving queries.
 // Iceberg mode refreshes discovered views in the background; DuckLake mode uses
 // its attached catalog directly. Start blocks until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) error {
-	// Iceberg tables must be discovered in S3 and exposed as views. DuckLake
-	// tables are already visible through the directly attached catalog.
-	if s.cfg.TargetFormat != "ducklake" {
-		if err := s.refreshAndRegister(ctx); err != nil {
-			s.logger.Warn("initial catalog refresh failed (will retry)", "error", err)
-		}
-		go s.refreshLoop(ctx)
-	}
+	s.startCatalogRefresh(ctx)
 
 	// Create psql-wire server
 	srv, err := wire.NewServer(s.handleParse,
@@ -299,11 +305,116 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
+func (s *Server) startCatalogRefresh(ctx context.Context) {
+	// Iceberg tables must be discovered in S3 and exposed as views. DuckLake
+	// tables are already visible through the directly attached catalog.
+	if s.cfg.TargetFormat == "ducklake" {
+		return
+	}
+	if err := s.refreshAndRegister(ctx); err != nil {
+		s.logger.Warn("initial catalog refresh failed (will retry)", "error", err)
+	}
+	go s.refreshLoop(ctx)
+}
+
+// StartHTTP starts the guarded JSON-over-HTTP query API. It blocks until the
+// context is cancelled or the HTTP server fails.
+func (s *Server) StartHTTP(ctx context.Context, addr string) error {
+	s.startCatalogRefresh(ctx)
+	httpServer := &http.Server{
+		Addr:              addr,
+		Handler:           s.HTTPHandler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       30 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+	}
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = httpServer.Shutdown(shutdownCtx)
+	}()
+
+	s.logger.Info("HTTP query server starting", "addr", addr)
+	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("listen: %w", err)
+	}
+	return nil
+}
+
+// HTTPHandler returns the public HTTP query API handler.
+func (s *Server) HTTPHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("POST /query", s.handleHTTPQuery)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		mux.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) handleHTTPQuery(w http.ResponseWriter, r *http.Request) {
+	if contentType := r.Header.Get("Content-Type"); !strings.HasPrefix(strings.ToLower(contentType), "application/json") {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "Content-Type must be application/json"})
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxQueryBytes+1024)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var request struct {
+		SQL string `json:"sql"`
+	}
+	if err := decoder.Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON request"})
+		return
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request must contain one JSON object"})
+		return
+	}
+	if err := validateReadOnlyQuery(request.SQL); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	result, err := s.Execute(r.Context(), request.SQL)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "query timed out"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func ensureJSONEOF(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("extra JSON value")
+		}
+		return err
+	}
+	return nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
 // handleParse is the psql-wire ParseFn. It receives a SQL query string and
-// returns prepared statements that execute the query against DuckDB.
+// returns prepared statements that stream a guarded query result.
 func (s *Server) handleParse(ctx context.Context, query string) (wire.PreparedStatements, error) {
-	query = strings.TrimSpace(query)
-	if query == "" {
+	if strings.TrimSpace(query) == "" {
 		return wire.Prepared(wire.NewStatement(
 			func(ctx context.Context, writer wire.DataWriter, params []wire.Parameter) error {
 				return writer.Complete("OK")
@@ -311,9 +422,47 @@ func (s *Server) handleParse(ctx context.Context, query string) (wire.PreparedSt
 		)), nil
 	}
 
-	s.logger.Debug("query received", "query", query)
+	result, err := s.Execute(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	columns := make(wire.Columns, len(result.Columns))
+	for i, column := range result.Columns {
+		columns[i] = wire.Column{
+			Table: 0,
+			Name:  column.Name,
+			Oid:   duckDBTypeToOID(column.Type),
+			Width: 256,
+		}
+	}
 
-	preparedQuery, err := prepareTimeTravelQuery(ctx, query, s.cfg.TargetFormat, s.catalog)
+	handle := func(ctx context.Context, writer wire.DataWriter, params []wire.Parameter) error {
+		for rowIdx, row := range result.Rows {
+			if err := writer.Row(row); err != nil {
+				s.logger.Error("write row failed", "row_index", rowIdx, "error", err)
+				return fmt.Errorf("write row: %w", err)
+			}
+		}
+		return writer.Complete(fmt.Sprintf("SELECT %d", result.RowCount))
+	}
+	return wire.Prepared(wire.NewStatement(handle, wire.WithColumns(columns))), nil
+}
+
+// Execute validates and runs one bounded, read-only query.
+func (s *Server) Execute(ctx context.Context, query string) (*QueryResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+	if err := validateReadOnlyQuery(query); err != nil {
+		return nil, err
+	}
+
+	s.logger.Debug("query received", "query", query)
+	queryCtx, cancel := context.WithTimeout(ctx, s.cfg.QueryTimeout)
+	defer cancel()
+
+	preparedQuery, err := prepareTimeTravelQuery(queryCtx, query, s.cfg.TargetFormat, s.catalog)
 	if err != nil {
 		return nil, fmt.Errorf("time travel query: %w", err)
 	}
@@ -324,75 +473,260 @@ func (s *Server) handleParse(ctx context.Context, query string) (wire.PreparedSt
 		// Give every client query an isolated, read-only attachment. Besides
 		// containing session mutations such as DETACH, reopening refreshes the
 		// snapshot cached by DuckDB-backed metadata catalogs.
-		if err := s.resetDuckLakeQueryDB(ctx); err != nil {
+		if err := s.resetDuckLakeQueryDB(queryCtx); err != nil {
 			return nil, err
 		}
 	}
 
-	// Execute query against DuckDB
-	rows, err := s.duckDB.QueryContext(ctx, preparedQuery)
+	rows, err := s.duckDB.QueryContext(queryCtx, preparedQuery)
 	if err != nil {
 		return nil, fmt.Errorf("query error: %w", err)
 	}
+	defer rows.Close()
 
-	// Read column metadata
 	colTypes, err := rows.ColumnTypes()
 	if err != nil {
-		rows.Close()
 		return nil, fmt.Errorf("column types: %w", err)
 	}
-
-	columns := make(wire.Columns, len(colTypes))
-	for i, ct := range colTypes {
-		columns[i] = wire.Column{
-			Table: 0,
-			Name:  ct.Name(),
-			Oid:   duckDBTypeToOID(ct.DatabaseTypeName()),
-			Width: 256,
-		}
+	columns := make([]QueryColumn, len(colTypes))
+	for i, column := range colTypes {
+		columns[i] = QueryColumn{Name: column.Name(), Type: column.DatabaseTypeName()}
 	}
 
-	// Read all rows into memory so we can close the DuckDB result set
-	// before streaming to the client.
-	colCount := len(colTypes)
-	var resultRows [][]any
+	resultRows := make([][]any, 0)
+	var resultBytes int64
 	for rows.Next() {
-		vals := make([]any, colCount)
-		ptrs := make([]any, colCount)
-		for i := range vals {
-			ptrs[i] = &vals[i]
+		if len(resultRows) >= s.cfg.MaxResultRows {
+			return nil, fmt.Errorf("query result exceeds the %d row limit", s.cfg.MaxResultRows)
 		}
-		if err := rows.Scan(ptrs...); err != nil {
-			rows.Close()
+		values := make([]any, len(colTypes))
+		pointers := make([]any, len(colTypes))
+		for i := range values {
+			pointers[i] = &values[i]
+		}
+		if err := rows.Scan(pointers...); err != nil {
 			return nil, fmt.Errorf("scan row: %w", err)
 		}
-		// Normalize DuckDB-specific value types that psql-wire can't encode directly.
-		for i, v := range vals {
-			vals[i] = normalizeValue(v, colTypes[i].DatabaseTypeName())
+		for i, value := range values {
+			values[i] = normalizeValue(value, colTypes[i].DatabaseTypeName())
+			resultBytes += approximateValueBytes(values[i])
 		}
-		resultRows = append(resultRows, vals)
+		if resultBytes > s.cfg.MaxResultBytes {
+			return nil, fmt.Errorf("query result exceeds the %d byte limit", s.cfg.MaxResultBytes)
+		}
+		resultRows = append(resultRows, values)
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
 
-	rowCount := len(resultRows)
-	handle := func(ctx context.Context, writer wire.DataWriter, params []wire.Parameter) error {
-		for rowIdx, row := range resultRows {
-			if err := writer.Row(row); err != nil {
-				s.logger.Error("write row failed",
-					"row_index", rowIdx,
-					"row", fmt.Sprintf("%v", row),
-					"error", err,
-				)
-				return fmt.Errorf("write row: %w", err)
+	return &QueryResult{Columns: columns, Rows: resultRows, RowCount: len(resultRows)}, nil
+}
+
+func validateReadOnlyQuery(query string) error {
+	if len(query) > maxQueryBytes {
+		return fmt.Errorf("query exceeds the %d byte limit", maxQueryBytes)
+	}
+	trimmed, err := trimLeadingSQLComments(query)
+	if err != nil {
+		return err
+	}
+	keywordEnd := 0
+	for keywordEnd < len(trimmed) {
+		c := trimmed[keywordEnd]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			break
+		}
+		keywordEnd++
+	}
+	firstKeyword := strings.ToUpper(trimmed[:keywordEnd])
+	if firstKeyword != "SELECT" && firstKeyword != "WITH" {
+		return fmt.Errorf("only SELECT statements are allowed")
+	}
+	forbidden := map[string]struct{}{
+		"ALTER": {}, "ATTACH": {}, "CALL": {}, "COPY": {}, "CREATE": {},
+		"DELETE": {}, "DETACH": {}, "DROP": {}, "EXPORT": {}, "IMPORT": {},
+		"INSERT": {}, "INSTALL": {}, "LOAD": {}, "MERGE": {}, "PRAGMA": {},
+		"SET": {}, "TRUNCATE": {}, "UPDATE": {}, "VACUUM": {},
+	}
+	for _, keyword := range unquotedSQLKeywords(query) {
+		if _, blocked := forbidden[keyword]; blocked {
+			return fmt.Errorf("only read-only SELECT statements are allowed")
+		}
+	}
+	if err := rejectMultipleStatements(query); err != nil {
+		return err
+	}
+	return nil
+}
+
+func unquotedSQLKeywords(query string) []string {
+	const (
+		sqlNormal = iota
+		sqlSingleQuote
+		sqlDoubleQuote
+		sqlLineComment
+		sqlBlockComment
+	)
+	state := sqlNormal
+	var keywords []string
+	for i := 0; i < len(query); {
+		switch state {
+		case sqlNormal:
+			switch {
+			case query[i] == '\'':
+				state = sqlSingleQuote
+				i++
+			case query[i] == '"':
+				state = sqlDoubleQuote
+				i++
+			case query[i] == '-' && i+1 < len(query) && query[i+1] == '-':
+				state = sqlLineComment
+				i += 2
+			case query[i] == '/' && i+1 < len(query) && query[i+1] == '*':
+				state = sqlBlockComment
+				i += 2
+			case (query[i] >= 'a' && query[i] <= 'z') || (query[i] >= 'A' && query[i] <= 'Z'):
+				start := i
+				for i < len(query) && ((query[i] >= 'a' && query[i] <= 'z') || (query[i] >= 'A' && query[i] <= 'Z') || query[i] == '_') {
+					i++
+				}
+				keywords = append(keywords, strings.ToUpper(query[start:i]))
+			default:
+				i++
+			}
+		case sqlSingleQuote:
+			if query[i] == '\'' {
+				if i+1 < len(query) && query[i+1] == '\'' {
+					i += 2
+				} else {
+					state = sqlNormal
+					i++
+				}
+			} else {
+				i++
+			}
+		case sqlDoubleQuote:
+			if query[i] == '"' {
+				if i+1 < len(query) && query[i+1] == '"' {
+					i += 2
+				} else {
+					state = sqlNormal
+					i++
+				}
+			} else {
+				i++
+			}
+		case sqlLineComment:
+			if query[i] == '\n' {
+				state = sqlNormal
+			}
+			i++
+		case sqlBlockComment:
+			if query[i] == '*' && i+1 < len(query) && query[i+1] == '/' {
+				state = sqlNormal
+				i += 2
+			} else {
+				i++
 			}
 		}
-		return writer.Complete(fmt.Sprintf("SELECT %d", rowCount))
 	}
+	return keywords
+}
 
-	return wire.Prepared(wire.NewStatement(handle, wire.WithColumns(columns))), nil
+func trimLeadingSQLComments(query string) (string, error) {
+	for {
+		query = strings.TrimLeft(query, " \t\r\n\f\v")
+		switch {
+		case strings.HasPrefix(query, "--"):
+			newline := strings.IndexByte(query, '\n')
+			if newline == -1 {
+				return "", fmt.Errorf("only SELECT statements are allowed")
+			}
+			query = query[newline+1:]
+		case strings.HasPrefix(query, "/*"):
+			end := strings.Index(query[2:], "*/")
+			if end == -1 {
+				return "", fmt.Errorf("unterminated SQL comment")
+			}
+			query = query[end+4:]
+		default:
+			return query, nil
+		}
+	}
+}
+
+func rejectMultipleStatements(query string) error {
+	const (
+		sqlNormal = iota
+		sqlSingleQuote
+		sqlDoubleQuote
+		sqlLineComment
+		sqlBlockComment
+	)
+	state := sqlNormal
+	for i := 0; i < len(query); i++ {
+		switch state {
+		case sqlNormal:
+			switch {
+			case query[i] == '\'':
+				state = sqlSingleQuote
+			case query[i] == '"':
+				state = sqlDoubleQuote
+			case query[i] == '-' && i+1 < len(query) && query[i+1] == '-':
+				state = sqlLineComment
+				i++
+			case query[i] == '/' && i+1 < len(query) && query[i+1] == '*':
+				state = sqlBlockComment
+				i++
+			case query[i] == ';':
+				rest, err := trimLeadingSQLComments(query[i+1:])
+				if err != nil || strings.TrimSpace(rest) != "" {
+					return fmt.Errorf("multiple SQL statements are not allowed")
+				}
+				return nil
+			}
+		case sqlSingleQuote:
+			if query[i] == '\'' {
+				if i+1 < len(query) && query[i+1] == '\'' {
+					i++
+				} else {
+					state = sqlNormal
+				}
+			}
+		case sqlDoubleQuote:
+			if query[i] == '"' {
+				if i+1 < len(query) && query[i+1] == '"' {
+					i++
+				} else {
+					state = sqlNormal
+				}
+			}
+		case sqlLineComment:
+			if query[i] == '\n' {
+				state = sqlNormal
+			}
+		case sqlBlockComment:
+			if query[i] == '*' && i+1 < len(query) && query[i+1] == '/' {
+				state = sqlNormal
+				i++
+			}
+		}
+	}
+	return nil
+}
+
+func approximateValueBytes(value any) int64 {
+	switch value := value.(type) {
+	case nil:
+		return 0
+	case string:
+		return int64(len(value))
+	case []byte:
+		return int64(len(value))
+	default:
+		return int64(len(fmt.Sprint(value)))
+	}
 }
 
 // refreshAndRegister refreshes the table catalog and re-registers DuckDB views.
@@ -417,6 +751,7 @@ func (s *Server) refreshAndRegister(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("re-open duckdb: %w", err)
 	}
+	db.SetMaxOpenConns(1)
 	if err := configureDuckDB(db, s.cfg); err != nil {
 		db.Close()
 		return fmt.Errorf("re-configure duckdb: %w", err)

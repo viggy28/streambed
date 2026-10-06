@@ -23,7 +23,7 @@ func main() {
 
 func run() error {
 	var (
-		databaseURL          = flag.String("database-url", env("HN_DATABASE_URL", "postgres://postgres:test@localhost:55432/hn?sslmode=disable"), "Postgres connection URL")
+		databaseURL          = flag.String("database-url", "", "Postgres connection URL (defaults to HN_DATABASE_URL or the local demo database)")
 		apiBaseURL           = flag.String("api-base-url", env("HN_API_BASE_URL", "https://hacker-news.firebaseio.com/v0"), "Hacker News API base URL")
 		pollInterval         = flag.Duration("poll-interval", envDuration("HN_POLL_INTERVAL", 30*time.Second), "poll interval")
 		maxItems             = flag.Int("max-items", envInt("HN_LIST_LIMIT", 100), "maximum items retained from each HN list")
@@ -35,6 +35,9 @@ func run() error {
 		dropReplicationSlot  = flag.String("drop-replication-slot", "", "drop an inactive Postgres replication slot, then exit")
 	)
 	flag.Parse()
+	if *databaseURL == "" {
+		*databaseURL = env("HN_DATABASE_URL", "postgres://postgres:test@localhost:55432/hn?sslmode=disable")
+	}
 
 	adminModes := 0
 	for _, enabled := range []bool{*migrateOnly, *verifySupabaseSchema, *dropReplicationSlot != ""} {

@@ -3,7 +3,8 @@
 This is the local-first implementation of [issue #108](https://github.com/viggy28/streambed/issues/108). It polls the public Hacker News API, writes current state to Postgres, and lets the real Streambed process replicate and query that state through Iceberg on MinIO.
 
 ```text
-HN API -> Postgres -> WAL -> Streambed -> Iceberg/MinIO -> psql
+Local:  HN API -> Postgres -> WAL -> Streambed -> Iceberg/MinIO -> psql
+Public: HTTP -> Cloudflare Worker -> on-demand query container -> Iceberg/R2
 ```
 
 Hacker News data comes from the [public HN API](https://github.com/HackerNews/API). This demo is not operated or endorsed by Y Combinator.
@@ -114,6 +115,63 @@ HN_FRONT_PAGE_SIZE
 
 All settings also have command-line flags. `--once` performs one reconciliation; `--migrate-only` creates the schema without contacting HN.
 
+## Deploy the query-only demo on Cloudflare
+
+The public deployment serves Streambed-produced Iceberg snapshots from R2. A Worker starts the query container on the first HTTP request and lets it sleep after one minute of inactivity. There is no public PostgreSQL port; the API accepts SQL over HTTPS.
+
+Requirements: the Cloudflare Workers Paid plan, Docker, Node.js, `curl`, `jq`, and two R2 API tokens scoped to the `streambed-hn-demo` bucket: object read/write for seeding and object read-only for the public query container.
+
+Create the bucket once:
+
+```bash
+npx wrangler r2 bucket create streambed-hn-demo
+```
+
+Create the two scoped R2 tokens in the Cloudflare dashboard and save their S3 credentials in macOS Keychain without putting them in shell history or source control:
+
+```bash
+# Read/write token used only by the seed/sync job.
+security add-generic-password -U \
+  -a streambed-hn-demo \
+  -s streambed-r2-writer-access-key-id \
+  -w
+security add-generic-password -U \
+  -a streambed-hn-demo \
+  -s streambed-r2-writer-secret-access-key \
+  -w
+
+# Read-only token passed to the public query container.
+security add-generic-password -U \
+  -a streambed-hn-demo \
+  -s streambed-r2-reader-access-key-id \
+  -w
+security add-generic-password -U \
+  -a streambed-hn-demo \
+  -s streambed-r2-reader-secret-access-key \
+  -w
+```
+
+Seed two snapshots directly into R2 and verify current and historical HTTP queries:
+
+```bash
+./demo/hn/scripts/seed-r2.sh
+```
+
+Build and deploy the Worker and container, then install the two R2 credentials as encrypted Worker secrets:
+
+```bash
+./demo/hn/scripts/deploy-cloudflare.sh
+```
+
+Query the deployed URL:
+
+```bash
+export STREAMBED_DEMO_QUERY_URL='https://streambed-hn-demo.<workers-subdomain>.workers.dev/query'
+./demo/hn/scripts/smoke-test-http.sh
+```
+
+A request body has the form `{"sql":"SELECT * FROM front_page LIMIT 10"}`. The Worker permits ten queries per client IP per minute. The container is restricted to one read-only statement, 10 seconds, 1,000 rows, 8 MiB of results, and 128 MiB of DuckDB memory. External access is restricted to the demo's Iceberg prefix plus DuckDB's extension cache.
+
 ## Supabase source
 
 Streambed must use the project's direct Postgres connection with TLS, not Supavisor transaction pooling, because logical replication requires a persistent connection. The Streambed host also needs IPv6 connectivity unless the Supabase project has IPv4 connectivity enabled.
@@ -150,4 +208,4 @@ Stopping the local processes intentionally leaves the remote replication slot av
 
 `reset-local.sh` only removes local state; it does not remove Supabase tables or replication slots. Do not reset or move the lake while reusing an advanced slot: Streambed does not backfill rows that predate the target.
 
-Public TLS, query limits, rate limits, deployment, and the landing page are still deferred.
+Periodic hosted ingestion, the custom domain, and the landing page remain deferred. The next deployment phase is a scheduled Cloudflare sync container that catches up from Supabase, flushes, and exits.

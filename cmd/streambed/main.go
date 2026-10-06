@@ -84,7 +84,9 @@ func main() {
 	queryCmd.Flags().StringVar(&cfg.DuckLakeCatalogStore, "ducklake-catalog-store", cfg.DuckLakeCatalogStore, "DuckLake catalog store: sqlite or duckdb")
 	queryCmd.Flags().StringVar(&cfg.DuckLakeDataPath, "ducklake-data-path", cfg.DuckLakeDataPath, "DuckLake data path (defaults to s3://bucket/prefix/ducklake/)")
 	queryCmd.Flags().StringVar(&cfg.DuckLakeExtension, "ducklake-extension", cfg.DuckLakeExtension, "Path to a pinned DuckLake extension binary")
-	queryCmd.Flags().StringVar(&cfg.QueryAddr, "listen-addr", cfg.QueryAddr, "Listen address for query server")
+	queryCmd.Flags().StringVar(&cfg.QueryAddr, "listen-addr", cfg.QueryAddr, "PostgreSQL-wire listen address")
+	queryCmd.Flags().StringVar(&cfg.HTTPQueryAddr, "http-listen-addr", cfg.HTTPQueryAddr, "HTTP query API listen address")
+	queryCmd.Flags().IntVar(&cfg.QueryMemoryLimitMB, "query-memory-limit-mb", cfg.QueryMemoryLimitMB, "DuckDB query memory limit in MiB")
 	queryCmd.Flags().StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level (DEBUG, INFO, WARN, ERROR)")
 
 	var snapshotsTable string
@@ -373,6 +375,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 			DuckLakeCatalogStore: cfg.DuckLakeCatalogStore,
 			DuckLakeDataPath:     cfg.EffectiveDuckLakeDataPath(),
 			DuckLakeExtension:    cfg.DuckLakeExtension,
+			QueryMemoryLimitMB:   cfg.QueryMemoryLimitMB,
 		}, s3Client, logger)
 		if err != nil {
 			return fmt.Errorf("create query server: %w", err)
@@ -628,13 +631,17 @@ func runQuery(cmd *cobra.Command, args []string) error {
 			cfg.DuckLakeExtension = f.Value.String()
 		case "listen-addr":
 			cfg.QueryAddr = f.Value.String()
+		case "http-listen-addr":
+			cfg.HTTPQueryAddr = f.Value.String()
+		case "query-memory-limit-mb":
+			cfg.QueryMemoryLimitMB, _ = strconv.Atoi(f.Value.String())
 		case "log-level":
 			cfg.LogLevel = f.Value.String()
 		}
 	})
 
-	// Default listen address for query command
-	if cfg.QueryAddr == "" {
+	// Preserve the PostgreSQL-wire default unless HTTP was explicitly selected.
+	if cfg.QueryAddr == "" && cfg.HTTPQueryAddr == "" {
 		cfg.QueryAddr = ":5433"
 	}
 
@@ -648,6 +655,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		"prefix", cfg.S3Prefix,
 		"target_format", cfg.TargetFormat,
 		"listen_addr", cfg.QueryAddr,
+		"http_listen_addr", cfg.HTTPQueryAddr,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -679,14 +687,19 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		DuckLakeCatalogStore: cfg.DuckLakeCatalogStore,
 		DuckLakeDataPath:     cfg.EffectiveDuckLakeDataPath(),
 		DuckLakeExtension:    cfg.DuckLakeExtension,
+		QueryMemoryLimitMB:   cfg.QueryMemoryLimitMB,
 	}, s3Client, logger)
 	if err != nil {
 		return fmt.Errorf("create query server: %w", err)
 	}
 	defer querySrv.Close()
 
-	// Start blocks until ctx is cancelled
-	if err := querySrv.Start(ctx); err != nil {
+	// Start blocks until ctx is cancelled.
+	if cfg.HTTPQueryAddr != "" {
+		if err := querySrv.StartHTTP(ctx, cfg.HTTPQueryAddr); err != nil {
+			return fmt.Errorf("HTTP query server: %w", err)
+		}
+	} else if err := querySrv.Start(ctx); err != nil {
 		return fmt.Errorf("query server: %w", err)
 	}
 

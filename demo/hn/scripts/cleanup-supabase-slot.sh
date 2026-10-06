@@ -19,9 +19,7 @@ if [[ -f "$streambed_pid_file" ]] && kill -0 "$(cat "$streambed_pid_file")" 2>/d
 fi
 
 mkdir -p "$BIN_DIR"
-if [[ ! -x "$BIN_DIR/hn-ingester" ]]; then
-  (cd "$PROJECT_DIR" && go build -o "$BIN_DIR/hn-ingester" ./demo/hn/cmd/hn-ingester)
-fi
+(cd "$PROJECT_DIR" && go build -o "$BIN_DIR/hn-ingester" ./demo/hn/cmd/hn-ingester)
 
 DB_PASSWORD="$(security find-generic-password \
   -a "$SUPABASE_KEYCHAIN_ACCOUNT" \

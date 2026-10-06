@@ -1,0 +1,50 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "streambed-hn-demo",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-05",
+  "observability": {
+    "enabled": true
+  },
+  "containers": [
+    {
+      "class_name": "QueryContainer",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "query": {
+          "dockerfile": "../Dockerfile.query",
+          "build_context": "../../.."
+        }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "QUERY_CONTAINER",
+        "class_name": "QueryContainer"
+      }
+    ]
+  },
+  "exports": {
+    "QueryContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "vars": {
+    "S3_BUCKET": "streambed-hn-demo",
+    "S3_PREFIX": "hn-demo",
+    "S3_ENDPOINT": "https://75c3ef432a1ebf389a8fdc403a582b1e.r2.cloudflarestorage.com"
+  },
+  "ratelimits": [
+    {
+      "name": "QUERY_RATE_LIMITER",
+      "namespace_id": "108",
+      "simple": {
+        "limit": 10,
+        "period": 60
+      }
+    }
+  ]
+}
