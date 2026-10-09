@@ -7,6 +7,8 @@ demo/hn/.local/
 demo/hn/cloudflare/node_modules/
 demo/hn/cloudflare/.wrangler/
 demo/hn/cloudflare/.dev.vars*
+demo/hn/cloudflare/test-results/
+demo/hn/cloudflare/playwright-report/
 .claude
 .pi-subagents/
 

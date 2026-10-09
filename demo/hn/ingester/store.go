@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -52,7 +53,7 @@ func (s *Store) Close(ctx context.Context) error {
 }
 
 func (s *Store) VerifySupabaseSchema(ctx context.Context) error {
-	expectedTables := []string{"stories", "rankings", "front_page", "ingestion_status"}
+	expectedTables := []string{"stories", "story_analytics", "rankings", "front_page", "ingestion_status", "backfill_status"}
 	for _, table := range expectedTables {
 		var rlsEnabled bool
 		err := s.conn.QueryRow(ctx, `
@@ -90,7 +91,7 @@ func (s *Store) VerifySupabaseSchema(ctx context.Context) error {
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("read streambed_hn_demo publication: %w", err)
 	}
-	expectedPublished := []string{"public.stories", "public.rankings", "public.front_page"}
+	expectedPublished := []string{"public.stories", "public.story_analytics", "public.rankings", "public.front_page"}
 	if len(actual) != len(expectedPublished) {
 		return fmt.Errorf("verify streambed_hn_demo publication: got %d tables, want %d", len(actual), len(expectedPublished))
 	}
@@ -120,6 +121,143 @@ func (s *Store) DropReplicationSlot(ctx context.Context, slotName string) (bool,
 		return false, fmt.Errorf("drop replication slot %s: %w", slotName, err)
 	}
 	return true, nil
+}
+
+func writeStoryAnalytics(ctx context.Context, tx pgx.Tx, item Item, createdAt any, update bool) error {
+	postgresql := containsASCIIWord(item.Title, "postgres") || containsASCIIWord(item.Title, "postgresql")
+	query := `
+		INSERT INTO story_analytics (
+			story_id, created_at, score, comment_count, mentions_postgresql,
+			mentions_mysql, mentions_ai, mentions_rust, mentions_python
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (story_id) DO NOTHING`
+	if update {
+		query = `
+			INSERT INTO story_analytics (
+				story_id, created_at, score, comment_count, mentions_postgresql,
+				mentions_mysql, mentions_ai, mentions_rust, mentions_python
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			ON CONFLICT (story_id) DO UPDATE SET
+				created_at = EXCLUDED.created_at,
+				score = EXCLUDED.score,
+				comment_count = EXCLUDED.comment_count,
+				mentions_postgresql = EXCLUDED.mentions_postgresql,
+				mentions_mysql = EXCLUDED.mentions_mysql,
+				mentions_ai = EXCLUDED.mentions_ai,
+				mentions_rust = EXCLUDED.mentions_rust,
+				mentions_python = EXCLUDED.mentions_python
+			WHERE (story_analytics.created_at, story_analytics.score,
+			       story_analytics.comment_count, story_analytics.mentions_postgresql,
+			       story_analytics.mentions_mysql, story_analytics.mentions_ai,
+			       story_analytics.mentions_rust, story_analytics.mentions_python)
+			  IS DISTINCT FROM
+			      (EXCLUDED.created_at, EXCLUDED.score, EXCLUDED.comment_count,
+			       EXCLUDED.mentions_postgresql, EXCLUDED.mentions_mysql,
+			       EXCLUDED.mentions_ai, EXCLUDED.mentions_rust,
+			       EXCLUDED.mentions_python)`
+	}
+	_, err := tx.Exec(ctx, query,
+		item.ID, createdAt, item.Score, item.Descendants, postgresql,
+		containsASCIIWord(item.Title, "mysql"), containsASCIIWord(item.Title, "ai"),
+		containsASCIIWord(item.Title, "rust"), containsASCIIWord(item.Title, "python"),
+	)
+	return err
+}
+
+func containsASCIIWord(value, word string) bool {
+	value = strings.ToLower(value)
+	for offset := 0; offset <= len(value)-len(word); {
+		index := strings.Index(value[offset:], word)
+		if index < 0 {
+			return false
+		}
+		index += offset
+		end := index + len(word)
+		leftBoundary := index == 0 || !isASCIIWordByte(value[index-1])
+		rightBoundary := end == len(value) || !isASCIIWordByte(value[end])
+		if leftBoundary && rightBoundary {
+			return true
+		}
+		offset = index + 1
+	}
+	return false
+}
+
+func isASCIIWordByte(value byte) bool {
+	return (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') || value == '_'
+}
+
+func (s *Store) PrepareBackfill(ctx context.Context, source string, start, end time.Time) (time.Time, error) {
+	_, err := s.conn.Exec(ctx, `
+		INSERT INTO backfill_status (source, range_start, range_end, next_start)
+		VALUES ($1, $2, $3, $2)
+		ON CONFLICT (source) DO NOTHING`, source, start, end)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("initialize backfill checkpoint: %w", err)
+	}
+	var storedStart, storedEnd, next time.Time
+	if err := s.conn.QueryRow(ctx, `
+		SELECT range_start, range_end, next_start
+		FROM backfill_status
+		WHERE source = $1`, source).Scan(&storedStart, &storedEnd, &next); err != nil {
+		return time.Time{}, fmt.Errorf("read backfill checkpoint: %w", err)
+	}
+	if !storedStart.Equal(start) || !storedEnd.Equal(end) {
+		return time.Time{}, fmt.Errorf("backfill %q already uses range %s to %s", source, storedStart.UTC().Format(time.RFC3339), storedEnd.UTC().Format(time.RFC3339))
+	}
+	return next.UTC(), nil
+}
+
+func (s *Store) ApplyHistoricalWindow(ctx context.Context, source string, windowStart, windowEnd time.Time, items []Item, observedAt time.Time) (int64, error) {
+	tx, err := s.conn.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin historical window: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var inserted int64
+	for _, item := range items {
+		var createdAt any
+		if item.Time > 0 {
+			createdAt = time.Unix(item.Time, 0).UTC()
+		}
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO stories (
+				id, story_type, title, url, author, score, comment_count,
+				dead, deleted, created_at, source_updated_at, ingested_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
+			ON CONFLICT (id) DO NOTHING`,
+			item.ID, item.Type, nullIfEmpty(item.Title), nullIfEmpty(item.URL),
+			nullIfEmpty(item.By), item.Score, item.Descendants, item.Dead, item.Deleted,
+			createdAt, observedAt,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("insert historical story %d: %w", item.ID, err)
+		}
+		inserted += tag.RowsAffected()
+		if err := writeStoryAnalytics(ctx, tx, item, createdAt, false); err != nil {
+			return 0, fmt.Errorf("insert historical story analytics %d: %w", item.ID, err)
+		}
+	}
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE backfill_status
+		SET next_start = $1,
+		    rows_seen = rows_seen + $2,
+		    rows_inserted = rows_inserted + $3,
+		    updated_at = clock_timestamp()
+		WHERE source = $4 AND next_start = $5`,
+		windowEnd, len(items), inserted, source, windowStart)
+	if err != nil {
+		return 0, fmt.Errorf("advance backfill checkpoint: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return 0, fmt.Errorf("backfill checkpoint changed concurrently; expected next window at %s", windowStart.UTC().Format(time.RFC3339))
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit historical window: %w", err)
+	}
+	return inserted, nil
 }
 
 func (s *Store) Apply(ctx context.Context, lists map[string][]int64, items []Item, observedAt time.Time) error {
@@ -164,6 +302,9 @@ func (s *Store) Apply(ctx context.Context, lists map[string][]int64, items []Ite
 		)
 		if err != nil {
 			return fmt.Errorf("upsert story %d: %w", item.ID, err)
+		}
+		if err := writeStoryAnalytics(ctx, tx, item, createdAt, true); err != nil {
+			return fmt.Errorf("upsert story analytics %d: %w", item.ID, err)
 		}
 	}
 

@@ -34,7 +34,33 @@ jobs:
         run: go build -o streambed ./cmd/streambed
 
       - name: Unit tests
-        run: go test -race ./internal/... ./config/...
+        run: go test -race ./internal/... ./config/... ./demo/hn/...
+
+  hn-demo-ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: demo/hn/cloudflare
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: demo/hn/cloudflare/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Type-check and validate deployment
+        run: npm run check
+
+      - name: Browser tests
+        run: npm run test:e2e
 
   integration-smoke:
     if: github.event_name == 'pull_request'
