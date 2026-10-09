@@ -102,7 +102,7 @@ rm -f "$LOCAL_DIR/state-r2-seed.db" "$LOCAL_DIR/state-r2-seed.db-shm" "$LOCAL_DI
   --s3-region=auto \
   --state-path="$LOCAL_DIR/state-r2-seed.db" \
   --slot-name="$SLOT_NAME" \
-  --include-tables=public.stories,public.story_analytics,public.rankings,public.front_page \
+  --include-tables=public.stories,public.story_analytics,public.story_monthly,public.story_leaders,public.rankings,public.front_page \
   --flush-rows=100 \
   --flush-interval=2s \
   >"$LOG_DIR/r2-seed-streambed.log" 2>&1 &

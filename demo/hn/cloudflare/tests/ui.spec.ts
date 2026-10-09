@@ -14,6 +14,18 @@ test("runs the featured analytical query and renders its data", async ({ page })
   await expect(page.getByRole("cell", { name: "2026-09" })).toBeVisible();
 });
 
+test("clears stale results when a query fails", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator("#chart-container svg")).toBeVisible();
+
+  await page.locator("#sql-editor").fill("SELECT 'FORCE_TIMEOUT'");
+  await page.getByRole("button", { name: /Run query/ }).click();
+
+  await expect(page.locator("#query-status")).toContainText("query timed out");
+  await expect(page.locator("#chart-container svg")).toHaveCount(0);
+  await expect(page.locator("#row-count")).toHaveText("—");
+});
+
 test("selects and runs a retained front-page snapshot", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator("#snapshot-count")).toHaveText("2");

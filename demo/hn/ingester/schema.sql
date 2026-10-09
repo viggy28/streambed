@@ -25,6 +25,34 @@ CREATE TABLE IF NOT EXISTS story_analytics (
     mentions_python      BOOLEAN NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS story_analytics_created_at_idx
+    ON story_analytics (created_at);
+
+-- Small CDC-maintained rollup used by public full-history charts. Keeping this
+-- in Postgres means it reaches the lake through the same WAL path as raw rows.
+CREATE TABLE IF NOT EXISTS story_monthly (
+    month                 DATE PRIMARY KEY,
+    story_count           BIGINT NOT NULL,
+    average_score         DOUBLE PRECISION,
+    mentions_postgresql   BIGINT NOT NULL,
+    mentions_mysql        BIGINT NOT NULL,
+    mentions_ai           BIGINT NOT NULL,
+    mentions_rust         BIGINT NOT NULL,
+    mentions_python       BIGINT NOT NULL
+);
+
+-- Narrow projection for bounded top-conversation queries in the public demo.
+CREATE TABLE IF NOT EXISTS story_leaders (
+    story_id       BIGINT PRIMARY KEY,
+    created_at     TIMESTAMPTZ,
+    title          TEXT NOT NULL,
+    score          BIGINT,
+    comment_count  BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS story_leaders_created_at_idx
+    ON story_leaders (created_at);
+
 CREATE TABLE IF NOT EXISTS rankings (
     list_name   TEXT NOT NULL,
     story_id    BIGINT NOT NULL,

@@ -10,15 +10,13 @@ const presets = [
     description: "Monthly HN story-title mentions during the last two years.",
     chart: { type: "line", category: 0, series: [1, 2] },
     sql: `SELECT
-  strftime(date_trunc('month', created_at), '%Y-%m') AS month,
-  count(*) FILTER (WHERE mentions_postgresql) AS postgresql,
-  count(*) FILTER (WHERE mentions_mysql) AS mysql
-FROM story_analytics
-WHERE created_at >= date_trunc('month', current_date) - INTERVAL '24 months'
-  AND created_at < date_trunc('month', current_date)
-  AND (mentions_postgresql OR mentions_mysql)
-GROUP BY 1
-ORDER BY 1`,
+  strftime(month, '%Y-%m') AS month,
+  mentions_postgresql AS postgresql,
+  mentions_mysql AS mysql
+FROM story_monthly
+WHERE month >= date_trunc('month', current_date) - INTERVAL '24 months'
+  AND month < date_trunc('month', current_date)
+ORDER BY month`,
   },
   {
     id: "story-volume",
@@ -29,13 +27,13 @@ ORDER BY 1`,
     description: "How many tracked stories appeared each month, with their average score.",
     chart: { type: "line", category: 0, series: [1, 2] },
     sql: `SELECT
-  strftime(date_trunc('month', created_at), '%Y-%m') AS month,
-  count(*) AS stories,
-  round(avg(score), 1) AS avg_score
-FROM story_analytics
-WHERE created_at >= current_date - INTERVAL '2 years'
-GROUP BY 1
-ORDER BY 1`,
+  strftime(month, '%Y-%m') AS month,
+  story_count AS stories,
+  round(average_score, 1) AS avg_score
+FROM story_monthly
+WHERE month >= date_trunc('month', current_date) - INTERVAL '24 months'
+  AND month < date_trunc('month', current_date)
+ORDER BY month`,
   },
   {
     id: "most-discussed",
@@ -43,17 +41,16 @@ ORDER BY 1`,
     kicker: "CONVERSATION",
     title: "Most discussed stories",
     short: "Most discussed",
-    description: "Stories that generated the largest conversations in the selected history.",
+    description: "Stories with at least 500 comments, ranked by conversation size during the last two years.",
     chart: { type: "bar", category: 0, series: [1] },
     sql: `SELECT
   title,
   comment_count AS comments,
   score,
   strftime(created_at, '%Y-%m-%d') AS published
-FROM stories
+FROM story_leaders
 WHERE created_at >= current_date - INTERVAL '2 years'
-  AND title IS NOT NULL
-ORDER BY comment_count DESC NULLS LAST
+ORDER BY comment_count DESC
 LIMIT 15`,
   },
   {
@@ -65,16 +62,15 @@ LIMIT 15`,
     description: "Compare monthly title mentions for several recurring HN topics.",
     chart: { type: "line", category: 0, series: [1, 2, 3, 4] },
     sql: `SELECT
-  strftime(date_trunc('month', created_at), '%Y-%m') AS month,
-  count(*) FILTER (WHERE mentions_ai) AS ai,
-  count(*) FILTER (WHERE mentions_rust) AS rust,
-  count(*) FILTER (WHERE mentions_python) AS python,
-  count(*) FILTER (WHERE mentions_postgresql) AS postgresql
-FROM story_analytics
-WHERE created_at >= current_date - INTERVAL '2 years'
-  AND (mentions_ai OR mentions_rust OR mentions_python OR mentions_postgresql)
-GROUP BY 1
-ORDER BY 1`,
+  strftime(month, '%Y-%m') AS month,
+  mentions_ai AS ai,
+  mentions_rust AS rust,
+  mentions_python AS python,
+  mentions_postgresql AS postgresql
+FROM story_monthly
+WHERE month >= date_trunc('month', current_date) - INTERVAL '24 months'
+  AND month < date_trunc('month', current_date)
+ORDER BY month`,
   },
   {
     id: "front-page",
@@ -197,7 +193,12 @@ async function runQuery() {
   }
   if (state.running) return;
   state.running = true;
+  state.result = null;
   elements.run.disabled = true;
+  elements.executionTime.textContent = "—";
+  elements.rowCount.textContent = "—";
+  elements.tableContainer.replaceChildren();
+  elements.chartContainer.replaceChildren(makeElement("div", "empty-result", "Waiting for query results…"));
   const started = performance.now();
   setStatus("running", "Starting query…");
   const wakeMessage = window.setTimeout(() => {
