@@ -206,7 +206,7 @@ A request body has the form `{"sql":"SELECT * FROM front_page LIMIT 10"}`. The W
 
 Streambed must use the project's direct Postgres connection with TLS, not Supavisor transaction pooling, because logical replication requires a persistent connection. The Streambed host also needs IPv6 connectivity unless the Supabase project has IPv4 connectivity enabled.
 
-First apply `supabase/migrations/202610020642_create_streambed_hn_demo_source.sql` through Supabase MCP's `apply_migration` tool or the dashboard SQL editor. The startup script verifies that all four tables have RLS enabled and that the publication contains exactly the three CDC tables; it will not silently create an insecure schema.
+Apply the files in `supabase/migrations/` in timestamp order through Supabase MCP's `apply_migration` tool or the dashboard SQL editor. The startup script verifies that every source table has RLS enabled and that the publication contains exactly the six public CDC tables; it will not silently create an insecure schema.
 
 On macOS, save the project database password in Keychain without putting it in source code:
 
