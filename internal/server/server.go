@@ -19,6 +19,7 @@ import (
 
 	wire "github.com/jeroenrinzema/psql-wire"
 	"github.com/viggy28/streambed/internal/ducklake"
+	"github.com/viggy28/streambed/internal/iceberg"
 	"github.com/viggy28/streambed/internal/storage"
 )
 
@@ -52,10 +53,17 @@ const (
 type Server struct {
 	cfg                ServerConfig
 	catalog            *TableCatalog
+	snapshotLister     snapshotLister
 	duckDB             *sql.DB
 	duckDBMu           sync.Mutex
+	catalogRefreshMu   sync.Mutex
+	lastCatalogRefresh time.Time
+	refreshOnQuery     bool
 	logger             *slog.Logger
-	refreshBeforeQuery bool
+}
+
+type snapshotLister interface {
+	ListSnapshots(context.Context, string, string) ([]iceberg.SnapshotInfo, error)
 }
 
 // QueryColumn describes one column in an HTTP query result.
@@ -125,12 +133,16 @@ func NewServer(cfg ServerConfig, s3Client storage.ObjectStorage, logger *slog.Lo
 		catalog = NewTableCatalog(s3Client, cfg.S3Bucket, cfg.S3Prefix, logger)
 	}
 
-	return &Server{
+	server := &Server{
 		cfg:     cfg,
 		catalog: catalog,
 		duckDB:  db,
 		logger:  logger,
-	}, nil
+	}
+	if cfg.TargetFormat == "iceberg" {
+		server.snapshotLister = iceberg.NewCatalog(s3Client, cfg.S3Bucket, cfg.S3Prefix)
+	}
+	return server, nil
 }
 
 func (s *Server) resetDuckLakeQueryDB(ctx context.Context) error {
@@ -314,6 +326,8 @@ func (s *Server) startCatalogRefresh(ctx context.Context, continuous bool) {
 	}
 	if err := s.refreshAndRegister(ctx); err != nil {
 		s.logger.Warn("initial catalog refresh failed", "error", err)
+	} else {
+		s.lastCatalogRefresh = time.Now()
 	}
 	if continuous {
 		go s.refreshLoop(ctx)
@@ -324,9 +338,11 @@ func (s *Server) startCatalogRefresh(ctx context.Context, continuous bool) {
 // context is cancelled or the HTTP server fails.
 func (s *Server) StartHTTP(ctx context.Context, addr string) error {
 	// Cloudflare Containers determine idleness from process activity. Refresh
-	// before each HTTP query instead of running the 30-second background loop,
-	// which would otherwise prevent the container from sleeping.
-	s.refreshBeforeQuery = true
+	// once when HTTP mode starts instead of running the 30-second background
+	// loop, which would otherwise prevent the container from sleeping. Queries
+	// refresh lazily only when the catalog is stale, so the initial request does
+	// not repeat the startup refresh.
+	s.refreshOnQuery = true
 	s.startCatalogRefresh(ctx, false)
 	httpServer := &http.Server{
 		Addr:              addr,
@@ -357,11 +373,87 @@ func (s *Server) HTTPHandler() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("POST /query", s.handleHTTPQuery)
+	mux.HandleFunc("GET /snapshots", s.handleHTTPSnapshots)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		mux.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) handleHTTPSnapshots(w http.ResponseWriter, r *http.Request) {
+	if s.snapshotLister == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "snapshots are unavailable for this target"})
+		return
+	}
+
+	tableRef := r.URL.Query().Get("table")
+	parts := strings.Split(tableRef, ".")
+	if len(parts) != 2 || !isSafeIdentifier(parts[0]) || !isSafeIdentifier(parts[1]) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "table must be a schema.table identifier"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.QueryTimeout)
+	defer cancel()
+	snapshots, err := s.snapshotLister.ListSnapshots(ctx, parts[0], parts[1])
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "list snapshots: " + err.Error()})
+		return
+	}
+
+	const maxSnapshots = 100
+	truncated := len(snapshots) > maxSnapshots
+	if truncated {
+		snapshots = snapshots[:maxSnapshots]
+	}
+	type snapshotResponse struct {
+		SnapshotID     int64     `json:"snapshot_id"`
+		SequenceNumber int64     `json:"sequence_number"`
+		Timestamp      time.Time `json:"timestamp"`
+	}
+	result := make([]snapshotResponse, len(snapshots))
+	for i, snapshot := range snapshots {
+		result[i] = snapshotResponse{
+			SnapshotID:     snapshot.SnapshotID,
+			SequenceNumber: snapshot.SequenceNumber,
+			Timestamp:      snapshot.Timestamp,
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"table":     tableRef,
+		"snapshots": result,
+		"truncated": truncated,
+	})
+}
+
+func isSafeIdentifier(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || char == '_' || (i > 0 && char >= '0' && char <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func (s *Server) refreshCatalogIfStale(ctx context.Context) error {
+	if !s.refreshOnQuery || s.cfg.TargetFormat == "ducklake" {
+		return nil
+	}
+	s.catalogRefreshMu.Lock()
+	defer s.catalogRefreshMu.Unlock()
+	if time.Since(s.lastCatalogRefresh) < 45*time.Second {
+		return nil
+	}
+	if err := s.refreshAndRegister(ctx); err != nil {
+		return err
+	}
+	s.lastCatalogRefresh = time.Now()
+	return nil
 }
 
 func (s *Server) handleHTTPQuery(w http.ResponseWriter, r *http.Request) {
@@ -386,6 +478,11 @@ func (s *Server) handleHTTPQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateReadOnlyQuery(request.SQL); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if err := s.refreshCatalogIfStale(r.Context()); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "refresh catalog: " + err.Error()})
 		return
 	}
 
@@ -468,12 +565,6 @@ func (s *Server) Execute(ctx context.Context, query string) (*QueryResult, error
 	s.logger.Debug("query received", "query", query)
 	queryCtx, cancel := context.WithTimeout(ctx, s.cfg.QueryTimeout)
 	defer cancel()
-
-	if s.refreshBeforeQuery && s.cfg.TargetFormat != "ducklake" {
-		if err := s.refreshAndRegister(queryCtx); err != nil {
-			return nil, fmt.Errorf("refresh catalog: %w", err)
-		}
-	}
 
 	preparedQuery, err := prepareTimeTravelQuery(queryCtx, query, s.cfg.TargetFormat, s.catalog)
 	if err != nil {

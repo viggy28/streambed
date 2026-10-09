@@ -9,9 +9,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/viggy28/streambed/internal/iceberg"
 )
 
 func newHTTPTestServer(t *testing.T) *Server {
@@ -93,6 +96,56 @@ func TestHTTPQueryRejectsMalformedRequests(t *testing.T) {
 				t.Fatalf("status = %d, want %d, body = %s", response.Code, test.wantStatus, response.Body.String())
 			}
 		})
+	}
+}
+
+type fakeSnapshotLister struct {
+	snapshots []iceberg.SnapshotInfo
+	err       error
+}
+
+func (f fakeSnapshotLister) ListSnapshots(context.Context, string, string) ([]iceberg.SnapshotInfo, error) {
+	return f.snapshots, f.err
+}
+
+func TestHTTPSnapshots(t *testing.T) {
+	srv := newHTTPTestServer(t)
+	timestamp := time.Date(2026, time.October, 8, 12, 30, 0, 0, time.UTC)
+	srv.snapshotLister = fakeSnapshotLister{snapshots: []iceberg.SnapshotInfo{{
+		SnapshotID: 42, SequenceNumber: 7, Timestamp: timestamp,
+	}}}
+	request := httptest.NewRequest(http.MethodGet, "/snapshots?table=public.front_page", nil)
+	response := httptest.NewRecorder()
+
+	srv.HTTPHandler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Table     string `json:"table"`
+		Snapshots []struct {
+			SnapshotID int64     `json:"snapshot_id"`
+			Timestamp  time.Time `json:"timestamp"`
+		} `json:"snapshots"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if result.Table != "public.front_page" || len(result.Snapshots) != 1 || result.Snapshots[0].SnapshotID != 42 || !result.Snapshots[0].Timestamp.Equal(timestamp) {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestHTTPSnapshotsRejectsUnsafeTable(t *testing.T) {
+	srv := newHTTPTestServer(t)
+	srv.snapshotLister = fakeSnapshotLister{}
+	for _, table := range []string{"front_page", "public.front-page", "public.front_page;DROP TABLE stories"} {
+		request := httptest.NewRequest(http.MethodGet, "/snapshots?table="+url.QueryEscape(table), nil)
+		response := httptest.NewRecorder()
+		srv.HTTPHandler().ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Errorf("table %q status = %d, body = %s", table, response.Code, response.Body.String())
+		}
 	}
 }
 

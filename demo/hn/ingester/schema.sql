@@ -13,6 +13,18 @@ CREATE TABLE IF NOT EXISTS stories (
     ingested_at       TIMESTAMPTZ NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS story_analytics (
+    story_id             BIGINT PRIMARY KEY,
+    created_at           TIMESTAMPTZ,
+    score                BIGINT,
+    comment_count        BIGINT,
+    mentions_postgresql  BOOLEAN NOT NULL,
+    mentions_mysql       BOOLEAN NOT NULL,
+    mentions_ai          BOOLEAN NOT NULL,
+    mentions_rust        BOOLEAN NOT NULL,
+    mentions_python      BOOLEAN NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS rankings (
     list_name   TEXT NOT NULL,
     story_id    BIGINT NOT NULL,
@@ -37,8 +49,21 @@ CREATE TABLE IF NOT EXISTS front_page (
 );
 
 CREATE TABLE IF NOT EXISTS ingestion_status (
-    source             TEXT PRIMARY KEY,
-    last_poll_started  TIMESTAMPTZ NOT NULL,
+    source              TEXT PRIMARY KEY,
+    last_poll_started   TIMESTAMPTZ NOT NULL,
     last_poll_succeeded TIMESTAMPTZ NOT NULL,
-    tracked_items      INTEGER NOT NULL
+    tracked_items       INTEGER NOT NULL
+);
+
+-- Operational checkpoint only. This table is deliberately excluded from the
+-- Streambed publication because it is not part of the public analytical data.
+CREATE TABLE IF NOT EXISTS backfill_status (
+    source          TEXT PRIMARY KEY,
+    range_start     TIMESTAMPTZ NOT NULL,
+    range_end       TIMESTAMPTZ NOT NULL,
+    next_start      TIMESTAMPTZ NOT NULL,
+    rows_seen       BIGINT NOT NULL DEFAULT 0,
+    rows_inserted   BIGINT NOT NULL DEFAULT 0,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CHECK (range_start <= next_start AND next_start <= range_end)
 );

@@ -115,9 +115,39 @@ HN_FRONT_PAGE_SIZE
 
 All settings also have command-line flags. `--once` performs one reconciliation; `--migrate-only` creates the schema without contacting HN.
 
-## Deploy the query-only demo on Cloudflare
+## Backfill analytical history
 
-The public deployment serves Streambed-produced Iceberg snapshots from R2. A Worker starts the query container on the first HTTP request and lets it sleep after one minute of inactivity. There is no public PostgreSQL port; the API accepts SQL over HTTPS.
+The live HN API does not provide time-range queries. The historical backfill uses the public [Algolia HN Search API](https://hn.algolia.com/api) to seed story metadata, then live polling continues through the official HN API. Each completed UTC window and its checkpoint commit together, so rerunning the command resumes safely and existing live rows are not overwritten.
+
+Start Streambed first and confirm its logical replication slot is active. Then import the desired range through source Postgres so every row reaches Iceberg through normal WAL processing:
+
+```bash
+go run ./demo/hn/cmd/hn-backfill \
+  --database-url="$HN_DATABASE_URL" \
+  --since=2024-10-01 \
+  --until=2026-10-01
+```
+
+The `backfill_status` table records progress and is intentionally excluded from the Streambed publication. Full comments are not imported; public mention analyses match words in story titles.
+
+To create a complete production seed in a new R2 prefix, including two years of stories and two front-page snapshots, run:
+
+```bash
+STREAMBED_DEMO_S3_PREFIX=hn-demo-v3 \
+  ./demo/hn/scripts/seed-r2-history.sh
+```
+
+The script refuses to mix independent runs in one prefix, waits for the replication slot to acknowledge all imported WAL, and verifies coverage, term mentions, and time travel through the HTTP query server before succeeding. It preserves its isolated Postgres source and checkpoints after a failure; resume the same run with:
+
+```bash
+STREAMBED_DEMO_S3_PREFIX=hn-demo-v3 \
+STREAMBED_HISTORY_RESUME=1 \
+  ./demo/hn/scripts/seed-r2-history.sh
+```
+
+## Deploy the public demo on Cloudflare
+
+The public deployment serves an interactive analytics UI and Streambed-produced Iceberg snapshots from R2. A Worker starts the query container on the first SQL or metadata request and lets it sleep after one minute of inactivity. There is no public PostgreSQL port; the UI uses the read-only SQL-over-HTTPS API.
 
 Requirements: the Cloudflare Workers Paid plan, Docker, Node.js, `curl`, `jq`, and two R2 API tokens scoped to the `streambed-hn-demo` bucket: object read/write for seeding and object read-only for the public query container.
 
@@ -163,7 +193,7 @@ Build and deploy the Worker and container, then install the two R2 credentials a
 ./demo/hn/scripts/deploy-cloudflare.sh
 ```
 
-Query the deployed URL:
+Open <https://demo.streambed.dev> or smoke-test the deployed API:
 
 ```bash
 export STREAMBED_DEMO_QUERY_URL='https://demo.streambed.dev/query'
@@ -208,4 +238,4 @@ Stopping the local processes intentionally leaves the remote replication slot av
 
 `reset-local.sh` only removes local state; it does not remove Supabase tables or replication slots. Do not reset or move the lake while reusing an advanced slot: Streambed does not backfill rows that predate the target.
 
-Periodic hosted ingestion, the custom domain, and the landing page remain deferred. The next deployment phase is a scheduled Cloudflare sync container that catches up from Supabase, flushes, and exits.
+Periodic hosted ingestion remains deferred. The next deployment phase is a scheduled Cloudflare sync container that catches up from Supabase, flushes, and exits.

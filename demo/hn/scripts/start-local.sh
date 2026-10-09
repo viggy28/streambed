@@ -71,7 +71,7 @@ env \
     --s3-prefix=hn-demo \
     --state-path="$LOCAL_DIR/state.db" \
     --slot-name=streambed_hn_demo \
-    --include-tables=public.stories,public.rankings,public.front_page \
+    --include-tables=public.stories,public.story_analytics,public.rankings,public.front_page \
     --flush-rows=100 \
     --flush-interval=2s \
     --query-addr=:55433 \

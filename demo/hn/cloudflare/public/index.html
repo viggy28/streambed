@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Explore Hacker News with SQL over live Iceberg data produced from Postgres CDC by Streambed.">
+  <title>Streambed × Hacker News — live lakehouse explorer</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#workspace">Skip to query workspace</a>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="Streambed demo home">
+      <span class="brand-mark" aria-hidden="true">≈</span>
+      <span>streambed</span>
+    </a>
+    <nav aria-label="Main navigation">
+      <a href="#explore">Explore</a>
+      <a href="#how-it-works">How it works</a>
+      <a href="https://github.com/viggy28/streambed" rel="noreferrer">GitHub ↗</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero" id="explore">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="live-dot"></span> POSTGRES CDC → ICEBERG</p>
+        <h1>What is Hacker News<br><em>talking about?</em></h1>
+        <p class="hero-intro">Ask analytical questions across years of Hacker News data—then inspect the SQL running directly against Iceberg in R2.</p>
+        <div class="hero-actions">
+          <button class="primary-button" type="button" data-scroll-workspace>Explore the data <span>↓</span></button>
+          <a class="text-link" href="#how-it-works">See the pipeline</a>
+        </div>
+      </div>
+      <aside class="hero-question" aria-label="Featured question">
+        <div class="question-label"><span>Featured query</span><span class="question-number">01</span></div>
+        <blockquote>“How often did HN mention <strong>PostgreSQL</strong> compared with <strong>MySQL</strong>?”</blockquote>
+        <div class="mini-legend">
+          <span><i class="legend-postgres"></i> PostgreSQL</span>
+          <span><i class="legend-mysql"></i> MySQL</span>
+        </div>
+        <svg class="hero-sparkline" viewBox="0 0 500 120" role="img" aria-label="Decorative trend lines">
+          <path class="spark-grid" d="M0 30H500M0 60H500M0 90H500"></path>
+          <path class="spark-postgres" d="M0 99 C55 94 72 83 112 86 S171 72 211 75 S274 56 315 61 S371 43 407 48 S463 21 500 18"></path>
+          <path class="spark-mysql" d="M0 66 C45 55 84 60 120 53 S184 61 225 57 S283 68 326 65 S391 74 430 71 S474 77 500 74"></path>
+        </svg>
+      </aside>
+    </section>
+
+    <section class="dataset-strip" aria-label="Dataset status">
+      <div><span class="metric-label">Stories</span><strong id="story-count">—</strong></div>
+      <div><span class="metric-label">Coverage</span><strong id="coverage-range">Loading…</strong></div>
+      <div><span class="metric-label">Last observed</span><strong id="last-ingested">—</strong></div>
+      <div><span class="metric-label">Snapshots</span><strong id="snapshot-count">—</strong></div>
+    </section>
+
+    <section class="workspace-section" id="workspace">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">QUERY THE LAKE</p>
+          <h2>Start with a question.</h2>
+        </div>
+        <p>Choose an analysis, edit its SQL, and run it against Streambed's public read-only endpoint.</p>
+      </div>
+
+      <div class="workspace-shell">
+        <aside class="preset-panel" aria-label="Example analyses">
+          <div class="panel-title">Example analyses</div>
+          <div id="preset-list" class="preset-list"></div>
+        </aside>
+
+        <div class="query-workspace">
+          <div class="query-heading">
+            <div>
+              <p id="query-kicker" class="query-kicker">TECHNOLOGY TRENDS</p>
+              <h3 id="query-title">PostgreSQL vs MySQL</h3>
+              <p id="query-description">Monthly title mentions during the last two years.</p>
+            </div>
+            <label id="snapshot-control" class="snapshot-control" hidden>
+              <span>Snapshot</span>
+              <select id="snapshot-select" aria-label="Historical front-page snapshot"></select>
+            </label>
+          </div>
+
+          <div class="editor-wrap">
+            <div class="editor-toolbar">
+              <span>SQL</span>
+              <button type="button" id="copy-sql" class="icon-button">Copy SQL</button>
+            </div>
+            <label class="sr-only" for="sql-editor">SQL query</label>
+            <textarea id="sql-editor" spellcheck="false" autocomplete="off"></textarea>
+            <div class="editor-footer">
+              <span>Read-only · 10 second limit · 1,000 rows</span>
+              <button type="button" id="run-query" class="run-button"><span class="run-icon">▶</span> Run query <kbd>⌘↵</kbd></button>
+            </div>
+          </div>
+
+          <div id="query-status" class="query-status" role="status" aria-live="polite">
+            <span class="status-dot"></span><span id="status-message">Ready</span>
+          </div>
+
+          <section class="results-card" aria-labelledby="results-title">
+            <div class="results-toolbar">
+              <div>
+                <span class="results-label">RESULT</span>
+                <strong id="results-title">Query output</strong>
+              </div>
+              <div class="results-meta">
+                <span id="execution-time">—</span>
+                <span id="row-count">— rows</span>
+                <div class="view-toggle" role="group" aria-label="Result view">
+                  <button type="button" id="chart-view" class="active" aria-pressed="true">Chart</button>
+                  <button type="button" id="table-view" aria-pressed="false">Table</button>
+                </div>
+              </div>
+            </div>
+            <div id="chart-container" class="chart-container">
+              <div class="empty-result">Run a query to see its chart.</div>
+            </div>
+            <div id="table-container" class="table-container" hidden></div>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section class="how-section" id="how-it-works">
+      <div class="section-heading light-heading">
+        <div>
+          <p class="eyebrow">UNDER THE HOOD</p>
+          <h2>Operational rows in.<br>Analytical answers out.</h2>
+        </div>
+        <p>Streambed reads PostgreSQL's replication stream and continuously writes queryable Iceberg tables. The query container wakes only when someone asks a question.</p>
+      </div>
+      <ol class="pipeline" aria-label="Data pipeline">
+        <li><span class="pipeline-number">01</span><strong>HN data</strong><small>Public API</small></li>
+        <li><span class="pipeline-arrow">→</span><span class="pipeline-number">02</span><strong>Postgres</strong><small>Mutable source</small></li>
+        <li><span class="pipeline-arrow">→</span><span class="pipeline-number">03</span><strong>WAL</strong><small>Logical replication</small></li>
+        <li class="pipeline-highlight"><span class="pipeline-arrow">→</span><span class="pipeline-number">04</span><strong>Streambed</strong><small>CDC engine</small></li>
+        <li><span class="pipeline-arrow">→</span><span class="pipeline-number">05</span><strong>Iceberg / R2</strong><small>Historical lake</small></li>
+        <li><span class="pipeline-arrow">→</span><span class="pipeline-number">06</span><strong>DuckDB</strong><small>SQL over HTTPS</small></li>
+      </ol>
+      <div class="principles">
+        <article><span>↯</span><h3>Live CDC</h3><p>Inserts, updates, and deletes flow from Postgres through normal logical replication.</p></article>
+        <article><span>◷</span><h3>Time travel</h3><p>Rewind the front page to a retained snapshot and compare what changed.</p></article>
+        <article><span>◌</span><h3>Scale to zero</h3><p>Durable data stays in R2 while query compute sleeps between visitors.</p></article>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="brand"><span class="brand-mark">≈</span><span>streambed</span></div>
+    <p>Hacker News data comes from the public HN API and Algolia HN Search. This demo is not operated or endorsed by Y Combinator.</p>
+    <a href="https://github.com/viggy28/streambed" rel="noreferrer">View source on GitHub ↗</a>
+  </footer>
+</body>
+</html>
