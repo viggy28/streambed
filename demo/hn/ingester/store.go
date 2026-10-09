@@ -53,7 +53,7 @@ func (s *Store) Close(ctx context.Context) error {
 }
 
 func (s *Store) VerifySupabaseSchema(ctx context.Context) error {
-	expectedTables := []string{"stories", "story_analytics", "rankings", "front_page", "ingestion_status", "backfill_status"}
+	expectedTables := []string{"stories", "story_analytics", "story_monthly", "story_leaders", "rankings", "front_page", "ingestion_status", "backfill_status"}
 	for _, table := range expectedTables {
 		var rlsEnabled bool
 		err := s.conn.QueryRow(ctx, `
@@ -91,7 +91,7 @@ func (s *Store) VerifySupabaseSchema(ctx context.Context) error {
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("read streambed_hn_demo publication: %w", err)
 	}
-	expectedPublished := []string{"public.stories", "public.story_analytics", "public.rankings", "public.front_page"}
+	expectedPublished := []string{"public.stories", "public.story_analytics", "public.story_monthly", "public.story_leaders", "public.rankings", "public.front_page"}
 	if len(actual) != len(expectedPublished) {
 		return fmt.Errorf("verify streambed_hn_demo publication: got %d tables, want %d", len(actual), len(expectedPublished))
 	}
@@ -162,6 +162,95 @@ func writeStoryAnalytics(ctx context.Context, tx pgx.Tx, item Item, createdAt an
 		containsASCIIWord(item.Title, "rust"), containsASCIIWord(item.Title, "python"),
 	)
 	return err
+}
+
+const storyLeaderCommentThreshold = 500
+
+func writeStoryLeader(ctx context.Context, tx pgx.Tx, item Item, createdAt any, update bool) error {
+	if item.Title == "" || item.Descendants < storyLeaderCommentThreshold || item.Dead || item.Deleted {
+		if update {
+			if _, err := tx.Exec(ctx, `DELETE FROM story_leaders WHERE story_id = $1`, item.ID); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	query := `
+		INSERT INTO story_leaders (story_id, created_at, title, score, comment_count)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (story_id) DO NOTHING`
+	if update {
+		query = `
+			INSERT INTO story_leaders (story_id, created_at, title, score, comment_count)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (story_id) DO UPDATE SET
+				created_at = EXCLUDED.created_at,
+				title = EXCLUDED.title,
+				score = EXCLUDED.score,
+				comment_count = EXCLUDED.comment_count
+			WHERE (story_leaders.created_at, story_leaders.title,
+			       story_leaders.score, story_leaders.comment_count)
+			  IS DISTINCT FROM
+			      (EXCLUDED.created_at, EXCLUDED.title,
+			       EXCLUDED.score, EXCLUDED.comment_count)`
+	}
+	_, err := tx.Exec(ctx, query, item.ID, createdAt, item.Title, item.Score, item.Descendants)
+	return err
+}
+
+func refreshStoryMonths(ctx context.Context, tx pgx.Tx, items []Item) error {
+	months := make(map[time.Time]struct{})
+	for _, item := range items {
+		if item.Time <= 0 {
+			continue
+		}
+		createdAt := time.Unix(item.Time, 0).UTC()
+		month := time.Date(createdAt.Year(), createdAt.Month(), 1, 0, 0, 0, 0, time.UTC)
+		months[month] = struct{}{}
+	}
+	for month := range months {
+		nextMonth := month.AddDate(0, 1, 0)
+		_, err := tx.Exec(ctx, `
+			INSERT INTO story_monthly (
+				month, story_count, average_score, mentions_postgresql,
+				mentions_mysql, mentions_ai, mentions_rust, mentions_python
+			)
+			SELECT
+				$1::date,
+				count(*),
+				avg(score)::double precision,
+				count(*) FILTER (WHERE mentions_postgresql),
+				count(*) FILTER (WHERE mentions_mysql),
+				count(*) FILTER (WHERE mentions_ai),
+				count(*) FILTER (WHERE mentions_rust),
+				count(*) FILTER (WHERE mentions_python)
+			FROM story_analytics
+			WHERE created_at >= $2 AND created_at < $3
+			HAVING count(*) > 0
+			ON CONFLICT (month) DO UPDATE SET
+				story_count = EXCLUDED.story_count,
+				average_score = EXCLUDED.average_score,
+				mentions_postgresql = EXCLUDED.mentions_postgresql,
+				mentions_mysql = EXCLUDED.mentions_mysql,
+				mentions_ai = EXCLUDED.mentions_ai,
+				mentions_rust = EXCLUDED.mentions_rust,
+				mentions_python = EXCLUDED.mentions_python
+			WHERE (story_monthly.story_count, story_monthly.average_score,
+			       story_monthly.mentions_postgresql, story_monthly.mentions_mysql,
+			       story_monthly.mentions_ai, story_monthly.mentions_rust,
+			       story_monthly.mentions_python)
+			  IS DISTINCT FROM
+			      (EXCLUDED.story_count, EXCLUDED.average_score,
+			       EXCLUDED.mentions_postgresql, EXCLUDED.mentions_mysql,
+			       EXCLUDED.mentions_ai, EXCLUDED.mentions_rust,
+			       EXCLUDED.mentions_python)`,
+			month.Format(time.DateOnly), month, nextMonth,
+		)
+		if err != nil {
+			return fmt.Errorf("refresh story analytics for %s: %w", month.Format("2006-01"), err)
+		}
+	}
+	return nil
 }
 
 func containsASCIIWord(value, word string) bool {
@@ -238,6 +327,12 @@ func (s *Store) ApplyHistoricalWindow(ctx context.Context, source string, window
 		if err := writeStoryAnalytics(ctx, tx, item, createdAt, false); err != nil {
 			return 0, fmt.Errorf("insert historical story analytics %d: %w", item.ID, err)
 		}
+		if err := writeStoryLeader(ctx, tx, item, createdAt, false); err != nil {
+			return 0, fmt.Errorf("insert historical story leader %d: %w", item.ID, err)
+		}
+	}
+	if err := refreshStoryMonths(ctx, tx, items); err != nil {
+		return 0, err
 	}
 
 	tag, err := tx.Exec(ctx, `
@@ -306,6 +401,12 @@ func (s *Store) Apply(ctx context.Context, lists map[string][]int64, items []Ite
 		if err := writeStoryAnalytics(ctx, tx, item, createdAt, true); err != nil {
 			return fmt.Errorf("upsert story analytics %d: %w", item.ID, err)
 		}
+		if err := writeStoryLeader(ctx, tx, item, createdAt, true); err != nil {
+			return fmt.Errorf("upsert story leader %d: %w", item.ID, err)
+		}
+	}
+	if err := refreshStoryMonths(ctx, tx, items); err != nil {
+		return err
 	}
 
 	for listName, ids := range lists {

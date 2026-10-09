@@ -73,7 +73,7 @@ AWS_SECRET_ACCESS_KEY="$(security find-generic-password \
   -a streambed-hn-demo -s streambed-r2-writer-secret-access-key -w)"
 export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION=auto AWS_EC2_METADATA_DISABLED=true
 
-for table in public.stories public.story_analytics public.front_page; do
+for table in public.stories public.story_analytics public.story_monthly public.story_leaders public.front_page; do
   if "$BIN_DIR/streambed" snapshots \
       --table="$table" \
       --s3-bucket="$BUCKET" \
@@ -135,7 +135,7 @@ fi
   --s3-region=auto \
   --state-path="$STATE_PATH" \
   --slot-name="$SLOT_NAME" \
-  --include-tables=public.stories,public.story_analytics,public.rankings,public.front_page \
+  --include-tables=public.stories,public.story_analytics,public.story_monthly,public.story_leaders,public.rankings,public.front_page \
   --flush-rows=20000 \
   --flush-interval=30s \
   >"$LOG_DIR/r2-history-streambed.log" 2>&1 &
@@ -248,7 +248,7 @@ wait "$STREAMBED_PID"
 STREAMBED_PID=""
 
 echo "==> Compacting historical files for bounded public queries"
-for table in public.stories public.story_analytics; do
+for table in public.stories public.story_analytics public.story_monthly public.story_leaders; do
 "$BIN_DIR/streambed" maintenance compact \
   --table="$table" \
   --s3-bucket="$BUCKET" \
@@ -289,8 +289,8 @@ query() {
 
 coverage="$(query "SELECT count(*) AS stories, min(created_at) AS coverage_start, max(created_at) AS coverage_end FROM stories")"
 story_count="$(jq -r '.rows[0][0]' <<<"$coverage")"
-postgres_mentions="$(query "SELECT count(*) FROM story_analytics WHERE created_at >= TIMESTAMPTZ '$BACKFILL_SINCE' AND created_at < TIMESTAMPTZ '$BACKFILL_UNTIL' AND mentions_postgresql" | jq -r '.rows[0][0]')"
-mysql_mentions="$(query "SELECT count(*) FROM story_analytics WHERE created_at >= TIMESTAMPTZ '$BACKFILL_SINCE' AND created_at < TIMESTAMPTZ '$BACKFILL_UNTIL' AND mentions_mysql" | jq -r '.rows[0][0]')"
+postgres_mentions="$(query "SELECT sum(mentions_postgresql) FROM story_monthly WHERE month >= DATE '$BACKFILL_SINCE' AND month < DATE '$BACKFILL_UNTIL'" | jq -r '.rows[0][0]')"
+mysql_mentions="$(query "SELECT sum(mentions_mysql) FROM story_monthly WHERE month >= DATE '$BACKFILL_SINCE' AND month < DATE '$BACKFILL_UNTIL'" | jq -r '.rows[0][0]')"
 historical_timestamp="$(tail -n 1 "$SNAPSHOTS_FILE" | cut -f2)"
 historical_count="$(query "SELECT count(*) FROM front_page AS f AT (TIMESTAMP => TIMESTAMPTZ '$historical_timestamp')" | jq -r '.rows[0][0]')"
 

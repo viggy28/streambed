@@ -32,6 +32,9 @@ const server = createServer(async (request, response) => {
     let body = "";
     for await (const chunk of request) body += chunk;
     const { sql } = JSON.parse(body);
+    if (sql.includes("FORCE_TIMEOUT")) {
+      return json(response, { error: "query timed out" }, 504);
+    }
     if (sql.includes("AT (TIMESTAMP")) {
       return json(response, {
         columns: [
