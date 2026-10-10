@@ -33,10 +33,17 @@ import (
 	"github.com/viggy28/streambed/internal/wal"
 )
 
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
+)
+
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "streambed",
-		Short: "Postgres-to-Iceberg analytics engine",
+		Use:     "streambed",
+		Short:   "Postgres-to-Iceberg analytics engine",
+		Version: fmt.Sprintf("%s (commit %s, built %s)", version, commit, date),
 	}
 
 	syncCmd := &cobra.Command{

@@ -47,6 +47,7 @@ jobs:
       - name: Smoke test image
         run: |
           docker run --rm streambed:test --help
+          docker run --rm streambed:test --version | grep -q "dev"
           test "$(docker run --rm --entrypoint id streambed:test -u)" != "0"
 
   hn-demo-ui:
