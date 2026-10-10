@@ -18,6 +18,27 @@ Same analytical query on pgbench (1M accounts, 500K history rows). Postgres on t
 
 No ETL. No Spark. Just Postgres + S3.
 
+## Installation
+
+### Docker image (recommended)
+
+Streambed publishes a Linux `amd64` image to the GitHub Container Registry.
+Use a version tag in production; `latest` tracks the newest stable release.
+
+```bash
+docker pull ghcr.io/viggy28/streambed:latest
+docker run --rm ghcr.io/viggy28/streambed:latest --version
+```
+
+### GitHub Release binary (Docker-free)
+
+Each [GitHub Release](https://github.com/viggy28/streambed/releases) includes a
+Linux `amd64` binary archive and checksums. Download and extract the archive,
+then run Streambed directly or supervise it with systemd.
+
+Building from source is the contributor and development path; see
+[Development](#development).
+
 ## Quick Start
 
 ```bash
