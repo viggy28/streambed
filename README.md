@@ -21,25 +21,26 @@ No ETL. No Spark. Just Postgres + S3.
 ## Quick Start
 
 ```bash
-# Start Postgres + MinIO locally
-docker compose up -d
-
-# Build
-go build -o streambed ./cmd/streambed
-
-# Start syncing + query server on :5433
-./streambed sync \
-  --source-url="postgres://postgres:test@localhost:5432/postgres" \
-  --s3-bucket="streambed" \
-  --s3-endpoint="http://localhost:9000" \
-  --s3-prefix="test" \
-  --query-addr=:5433
+# Build Streambed and start it with Postgres + MinIO
+# The streambed profile exposes the query server on localhost:5433.
+docker compose --profile streambed up --build -d
 
 # Query your Postgres tables via Iceberg
 psql -h localhost -p 5433 -U postgres -d postgres
 ```
 
-Run `streambed sync --help` for all configuration options. All flags support environment variables with `STREAMBED_` prefix (e.g. `STREAMBED_SOURCE_URL`). UPDATE/DELETE use copy-on-write by default; opt into Iceberg v2 equality deletes with `--mutation-mode=mor` (or `STREAMBED_MUTATION_MODE=mor`) after verifying reader compatibility. Once a table has active equality deletes, Streambed fails startup in COW mode; continue using MOR.
+The container runs as a non-root user and stores its SQLite state and default
+DuckLake catalog in the `streambed-state` volume. Stop the stack with
+`docker compose --profile streambed down`; add `--volumes` to also remove that
+state.
+
+Run `docker compose run --rm streambed sync --help` for all configuration
+options. All flags support environment variables with the `STREAMBED_` prefix
+(e.g. `STREAMBED_SOURCE_URL`). UPDATE/DELETE use copy-on-write by default; opt
+into Iceberg v2 equality deletes with `--mutation-mode=mor` (or
+`STREAMBED_MUTATION_MODE=mor`) after verifying reader compatibility. Once a
+table has active equality deletes, Streambed fails startup in COW mode;
+continue using MOR.
 
 Use `--target-file-size-mb` (or `STREAMBED_TARGET_FILE_SIZE_MB`) to split large flushes into approximately target-sized Parquet data files. The default is 128 MiB. This is a target, not a hard maximum; small flushes still create small files.
 
