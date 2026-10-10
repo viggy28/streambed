@@ -25,7 +25,6 @@ RUN apt-get update \
     && install -d -o streambed -g streambed /var/lib/streambed
 
 ENV HOME=/home/streambed \
-    AWS_EC2_METADATA_DISABLED=true \
     STREAMBED_STATE_PATH=/var/lib/streambed/state.db \
     STREAMBED_DUCKLAKE_CATALOG=/var/lib/streambed/ducklake-catalog.duckdb
 

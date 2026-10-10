@@ -10,6 +10,8 @@ services:
         -c max_wal_senders=4
     ports:
       - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
@@ -27,6 +29,8 @@ services:
     ports:
       - "9000:9000"
       - "9001:9001"
+    volumes:
+      - minio-data:/data
     healthcheck:
       test: ["CMD", "/usr/bin/silo", "healthcheck", "ready"]
       interval: 2s
@@ -72,4 +76,6 @@ services:
     command: ["sync"]
 
 volumes:
+  postgres-data:
+  minio-data:
   streambed-state:
