@@ -36,8 +36,9 @@ Each [GitHub Release](https://github.com/viggy28/streambed/releases) includes a
 Linux `amd64` binary archive and checksums. Download and extract the archive,
 then run Streambed directly or supervise it with systemd.
 
-Building from source is the contributor and development path; see
-[Development](#development).
+See [Deploy Streambed](docs/deployment.md) for production `docker run` and
+systemd examples. Building from source is the contributor and development path;
+see [Development](#development).
 
 ## Quick Start
 
