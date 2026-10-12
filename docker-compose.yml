@@ -10,6 +10,8 @@ services:
         -c max_wal_senders=4
     ports:
       - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
@@ -27,6 +29,8 @@ services:
     ports:
       - "9000:9000"
       - "9001:9001"
+    volumes:
+      - minio-data:/data
     healthcheck:
       test: ["CMD", "/usr/bin/silo", "healthcheck", "ready"]
       interval: 2s
@@ -44,3 +48,34 @@ services:
       mcli mb local/streambed --ignore-existing;
       exit 0;
       "
+
+  streambed:
+    profiles: ["streambed"]
+    image: streambed:dev
+    build:
+      context: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      createbucket:
+        condition: service_completed_successfully
+    environment:
+      STREAMBED_SOURCE_URL: postgres://postgres:test@postgres:5432/postgres
+      STREAMBED_S3_BUCKET: streambed
+      STREAMBED_S3_ENDPOINT: http://minio:9000
+      STREAMBED_S3_PREFIX: test
+      STREAMBED_S3_REGION: us-east-1
+      STREAMBED_QUERY_ADDR: :5433
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+    volumes:
+      - streambed-state:/var/lib/streambed
+    ports:
+      - "5433:5433"
+    restart: unless-stopped
+    command: ["sync"]
+
+volumes:
+  postgres-data:
+  minio-data:
+  streambed-state:
