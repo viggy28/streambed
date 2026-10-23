@@ -8,6 +8,8 @@ Postgres-to-Iceberg CDC engine. Offload analytical queries from your production 
 
 streambed streams WAL changes via logical replication, writes Parquet files to S3, and commits Iceberg metadata. Query the result with any Iceberg-compatible engine -- or use the built-in query server, which speaks the Postgres wire protocol so you can connect with `psql`.
 
+**[Try the live Hacker News analytics demo →](https://demo.streambed.dev)**
+
 ## See It In Action
 
 Same analytical query on pgbench (1M accounts, 500K history rows). Postgres on the left, Streambed on the right.
