@@ -15,7 +15,11 @@ toc: false
 {{< /hextra/hero-subtitle >}}
 </div>
 
-<div class="hx-mb-6">
+<div class="hx-mb-6 hx-flex hx-flex-wrap hx-gap-3">
+{{< hextra/hero-badge link="https://demo.streambed.dev" >}}
+  <span>Live Demo</span>
+  {{< icon name="arrow-circle-right" attributes="height=14" >}}
+{{< /hextra/hero-badge >}}
 {{< hextra/hero-badge link="https://github.com/viggy28/streambed" >}}
   <span>GitHub</span>
   {{< icon name="arrow-circle-right" attributes="height=14" >}}
