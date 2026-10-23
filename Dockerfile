@@ -9,7 +9,12 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/streambed ./cmd/streambed
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG DATE=unknown
+RUN CGO_ENABLED=1 go build -trimpath \
+    -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" \
+    -o /out/streambed ./cmd/streambed
 
 FROM debian:bookworm-slim
 
